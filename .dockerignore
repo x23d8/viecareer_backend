@@ -1,0 +1,18 @@
+# Never bake secrets into the image
+.env
+.env.*
+!.env.example
+
+# Python artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Dev tooling
+.git/
+.gitignore
+*.md
