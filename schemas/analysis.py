@@ -43,6 +43,7 @@ class SaveInterviewReportRequest(BaseModel):
     avatar_url: str | None = None
     auth_provider: str = "clerk"
     cv_jd_analysis_id: str | None = None
+    live_session_id: str | None = None
     position: str
     duration_seconds: int = 0
     overall_score: int = 0

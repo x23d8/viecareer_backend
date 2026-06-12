@@ -14,11 +14,13 @@ from urllib.parse import quote
 import requests
 import websockets
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
 from config import OPENAI_API_KEY, OPENAI_REALTIME_MODEL
 from core.openai_client import get_openai_client
 from core.prompts import load_prompt
 from schemas.interview_simulation import SelectNextQuestionRequest
+from schemas.realtime import RealtimeSessionMetadata
 from services.interview_simulation_service import InterviewSimulationService
 from services.realtime_transcript_service import (
     complete_live_interview_session,
@@ -99,6 +101,7 @@ class _RelayState:
     transcript: list[dict[str, Any]] = field(default_factory=list)
     answered_question_ids: list[str] = field(default_factory=list)
     covered_topics: list[str] = field(default_factory=list)
+    initialized: bool = False
 
     def timestamp_sec(self) -> int:
         return max(0, int(time.monotonic() - self.started_at))
@@ -153,11 +156,44 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
         event_type = event.get("type")
 
         if event_type == "client.start":
+            if state.initialized:
+                await _send_client_error(websocket, "Realtime session context is already initialized")
+                await openai_ws.close()
+                return
+
             metadata = event.get("metadata")
-            state.metadata = metadata if isinstance(metadata, dict) else {}
+            if not isinstance(metadata, dict) or not metadata:
+                logger.info("Realtime client.start received without metadata; continuing without persistence")
+                continue
+
+            try:
+                validated = RealtimeSessionMetadata.model_validate(metadata)
+            except ValidationError as exc:
+                fields = sorted({".".join(str(part) for part in error["loc"]) for error in exc.errors()})
+                await _send_client_error(
+                    websocket,
+                    f"Invalid required session metadata: {', '.join(fields)}",
+                )
+                await openai_ws.close(code=1008, reason="Invalid session metadata")
+                return
+
+            state.metadata = validated.model_dump(mode="json")
+            state.blueprint = _coerce_blueprint(state.metadata.get("blueprint"))
             state.session_id = await asyncio.to_thread(_create_live_session_safe, state.metadata)
-            state.blueprint = _coerce_blueprint(state.metadata.get("interview_blueprint"))
+            if not state.session_id:
+                await _send_client_error(websocket, "Could not persist realtime interview context")
+                await openai_ws.close(code=1011, reason="Session persistence failed")
+                return
+
+            state.initialized = True
             await openai_ws.send(json.dumps(_session_update_event(state.metadata, state.blueprint)))
+            await websocket.send_json(
+                {
+                    "type": "viecareer.session.started",
+                    "session_id": state.session_id,
+                    "context_version": 1,
+                }
+            )
             continue
 
         if event_type == "client.stop":
@@ -241,10 +277,20 @@ def _session_update_event(
     blueprint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     instructions = load_prompt("realtime_interviewer")
-    jd_summary = str((metadata or {}).get("jd_summary") or "").strip()
+    job_description = str(
+        (metadata or {}).get("job_description")
+        or (metadata or {}).get("jd_summary")
+        or ""
+    ).strip()
     position = str((metadata or {}).get("position") or "").strip()
+    language = str((metadata or {}).get("language") or "en").strip().lower()
     interview_style = str((metadata or {}).get("interview_style") or "mixed").strip()
     blueprint_context = _blueprint_context(blueprint)
+    language_directive = (
+        "Conduct the entire interview in Vietnamese. Do not switch languages unless the candidate explicitly asks."
+        if language == "vi"
+        else "Conduct the entire interview in English. Do not switch languages unless the candidate explicitly asks."
+    )
 
     _STYLE_HINT = {
         "technical":  "This session is technical-focused: prioritise deep technical and coding questions. Spend less time on general behavioral questions.",
@@ -253,14 +299,15 @@ def _session_update_event(
     }
     style_hint = _STYLE_HINT.get(interview_style, _STYLE_HINT["mixed"])
 
-    if position or jd_summary or blueprint_context or style_hint:
+    if position or job_description or blueprint_context or style_hint:
         instructions = "\n\n".join(
             part
             for part in [
                 instructions,
                 f"Interview target position: {position}" if position else "",
-                f"Job description context: {jd_summary}" if jd_summary else "",
+                f"Job description context: {job_description}" if job_description else "",
                 _candidate_context(metadata),
+                f"Interview language directive: {language_directive}",
                 f"Interview style directive: {style_hint}",
                 blueprint_context,
             ]
@@ -280,7 +327,7 @@ def _session_update_event(
                         "type": "server_vad",
                         "threshold": 0.5,
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 800,
+                        "silence_duration_ms": 500,
                         "create_response": False,
                         "interrupt_response": True,
                     },
@@ -414,15 +461,20 @@ def _response_instructions(state: _RelayState, selected: dict[str, Any] | None) 
 def _candidate_context(metadata: dict[str, Any] | None) -> str:
     display_name = _candidate_display_name(metadata)
     full_name = _candidate_full_name(metadata)
-    if not display_name:
-        return ""
+    candidate = (metadata or {}).get("candidate")
+    profile = candidate.get("profile") if isinstance(candidate, dict) else {}
+    cv_text = _string_value(candidate.get("cv_text")) if isinstance(candidate, dict) else ""
 
     return "\n".join(
-        [
-            f"Candidate name from extracted CV: {full_name or display_name}",
-            f"Use this spoken candidate name in the opening greeting: {display_name}",
-            "Prefer the CV-extracted candidate name over the account name.",
+        part
+        for part in [
+            f"Candidate name from extracted CV: {full_name or display_name}" if (full_name or display_name) else "",
+            f"Use this spoken candidate name in the opening greeting: {display_name}" if display_name else "",
+            "Prefer the CV-extracted candidate name over the account name." if (full_name or display_name) else "",
+            f"Candidate structured profile: {json.dumps(profile, ensure_ascii=False)}" if profile else "",
+            f"Candidate CV context: {cv_text}" if cv_text else "",
         ]
+        if part
     )
 
 
@@ -474,19 +526,29 @@ def _candidate_full_name(metadata: dict[str, Any] | None) -> str:
     if not isinstance(metadata, dict):
         return ""
 
+    candidate = metadata.get("candidate")
+    if isinstance(candidate, dict):
+        value = _string_value(candidate.get("name"))
+        if value:
+            return value
+        extracted = candidate.get("profile")
+    else:
+        extracted = None
+
     for key in ("candidate_name", "candidate_full_name"):
         value = _string_value(metadata.get(key))
         if value:
             return value
 
-    extracted = metadata.get("extracted_analysis")
+    if not isinstance(extracted, dict):
+        extracted = metadata.get("extracted_analysis")
     if isinstance(extracted, dict):
         for key in ("fullName", "full_name", "candidateName", "candidate_name", "name"):
             value = _string_value(extracted.get(key))
             if value:
                 return value
 
-    blueprint = _coerce_blueprint(metadata.get("interview_blueprint"))
+    blueprint = _coerce_blueprint(metadata.get("blueprint")) or _coerce_blueprint(metadata.get("interview_blueprint"))
     analysis = blueprint.get("analysis") if blueprint and isinstance(blueprint.get("analysis"), dict) else {}
     for key in ("fullName", "full_name", "candidateName", "candidate_name", "name"):
         value = _string_value(analysis.get(key))

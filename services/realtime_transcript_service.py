@@ -24,6 +24,24 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
         avatar_url=metadata.get("avatar_url"),
         auth_provider=str(metadata.get("auth_provider") or "clerk"),
     )
+    candidate = metadata.get("candidate") if isinstance(metadata.get("candidate"), dict) else {}
+    position = str(metadata.get("position") or "Software Developer")
+    job_description = str(metadata.get("job_description") or metadata.get("jd_summary") or "")
+    language = str(metadata.get("language") or "en")
+    voice = str(metadata.get("voice") or "shimmer")
+    blueprint = metadata.get("blueprint") if isinstance(metadata.get("blueprint"), dict) else metadata.get("interview_blueprint")
+    blueprint = blueprint if isinstance(blueprint, dict) else {}
+    interview_style = str(metadata.get("interview_style") or "mixed")
+    context_snapshot = {
+        "candidate": candidate,
+        "position": position,
+        "job_description": job_description,
+        "language": language,
+        "voice": voice,
+        "blueprint": blueprint,
+        "interview_style": interview_style,
+        "cv_jd_analysis_id": metadata.get("cv_jd_analysis_id"),
+    }
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -36,15 +54,28 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                   position,
                   session_type,
                   status,
-                  started_at
+                  started_at,
+                  candidate_json,
+                  job_description,
+                  language,
+                  voice,
+                  blueprint_json,
+                  context_json
                 )
-                values (%s, %s, %s, 'mixed', 'in_progress', now())
+                values (%s, %s, %s, %s, 'in_progress', now(), %s, %s, %s, %s, %s, %s)
                 returning id
                 """,
                 (
                     user["id"],
                     metadata.get("cv_jd_analysis_id") or None,
-                    str(metadata.get("position") or "Software Developer"),
+                    position,
+                    interview_style,
+                    Json(candidate),
+                    job_description,
+                    language,
+                    voice,
+                    Json(blueprint),
+                    Json(context_snapshot),
                 ),
             )
             row = cur.fetchone()

@@ -97,6 +97,7 @@ async def save_interview_report_route(
         avatar_url=req.avatar_url,
         auth_provider=req.auth_provider,
         cv_jd_analysis_id=req.cv_jd_analysis_id,
+        live_session_id=req.live_session_id,
         position=req.position,
         duration_seconds=req.duration_seconds,
         overall_score=req.overall_score,
