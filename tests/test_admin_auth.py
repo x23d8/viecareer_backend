@@ -2,6 +2,7 @@
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("CLERK_JWKS_URL", "https://example.com/.well-known/jwks.json")
@@ -16,9 +17,12 @@ class AdminAuthorizationTests(unittest.TestCase):
     def setUp(self):
         app.dependency_overrides.clear()
         self.client = TestClient(app)
+        self._patches = []
 
     def tearDown(self):
         app.dependency_overrides.clear()
+        for active_patch in self._patches:
+            active_patch.stop()
 
     def authenticate_as(self, role: str | None):
         app.dependency_overrides[require_auth] = lambda: ClerkUser(
@@ -26,6 +30,11 @@ class AdminAuthorizationTests(unittest.TestCase):
             email="user@example.com",
             role=role,
         )
+
+    def set_db_user(self, role_id: int | None):
+        active_patch = patch("core.clerk_auth.get_connection", return_value=FakeConnection(role_id))
+        active_patch.start()
+        self._patches.append(active_patch)
 
     def test_extracts_role_from_public_metadata_claim(self):
         self.assertEqual(_extract_role({"public_metadata": {"role": "admin"}}), "admin")
@@ -40,7 +49,8 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertNotIn("data", response.json())
 
     def test_admin_endpoint_rejects_authenticated_non_admin_user(self):
-        self.authenticate_as("user")
+        self.authenticate_as("admin")
+        self.set_db_user(2)
 
         response = self.client.get("/api/admin/overview")
 
@@ -48,27 +58,86 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertNotIn("data", response.json())
 
     def test_admin_endpoint_allows_admin_user(self):
-        self.authenticate_as("admin")
+        self.authenticate_as("user")
+        self.set_db_user(1)
 
         response = self.client.get("/api/admin/overview")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {})
+        payload = response.json()["data"]
+        self.assertEqual(payload["current_admin"]["id"], "00000000-0000-0000-0000-000000000001")
+        self.assertEqual(payload["current_admin"]["email"], "admin@example.com")
+        self.assertEqual(payload["current_admin"]["full_name"], "Admin One")
+        self.assertEqual(payload["current_admin"]["role_id"], 1)
+        self.assertEqual(payload["dashboard"], {})
 
-    def test_database_metadata_still_requires_auth(self):
+    def test_admin_me_returns_current_admin_from_database(self):
+        self.authenticate_as("user")
+        self.set_db_user(1)
+
+        response = self.client.get("/api/admin/me")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["data"],
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "external_auth_id": "user_123",
+                "email": "admin@example.com",
+                "full_name": "Admin One",
+                "role_id": 1,
+            },
+        )
+
+    def test_database_metadata_is_not_registered_by_default(self):
         response = self.client.get("/api/db/_tables")
 
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 404)
 
-    def test_database_metadata_allows_authenticated_non_admin_without_querying_rows(self):
+    def test_database_metadata_stays_hidden_for_authenticated_users_by_default(self):
         self.authenticate_as("user")
 
         response = self.client.get("/api/db/_tables")
 
-        self.assertEqual(response.status_code, 200)
-        table_names = {table["name"] for table in response.json()["data"]}
-        self.assertIn("cv_jd_analyses", table_names)
-        self.assertIn("interview_sessions", table_names)
+        self.assertEqual(response.status_code, 404)
+
+
+class FakeConnection:
+    def __init__(self, role_id: int | None):
+        self.role_id = role_id
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def cursor(self):
+        return FakeCursor(self.role_id)
+
+
+class FakeCursor:
+    def __init__(self, role_id: int | None):
+        self.role_id = role_id
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, query, params):
+        return None
+
+    def fetchone(self):
+        if self.role_id is None:
+            return None
+        return {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "email": "admin@example.com",
+            "full_name": "Admin One",
+            "role_id": self.role_id,
+        }
 
 
 if __name__ == "__main__":

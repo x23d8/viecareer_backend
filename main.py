@@ -9,7 +9,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from config import CORS_ORIGIN_REGEX, CORS_ORIGINS
+from config import CORS_ORIGIN_REGEX, CORS_ORIGINS, ENABLE_DB_ADMIN_ROUTES
 from core.exceptions import (
     http_exception_handler,
     unhandled_exception_handler,
@@ -17,7 +17,7 @@ from core.exceptions import (
 )
 from core.middleware import AsyncTimeoutMiddleware, PayloadSizeLimitMiddleware
 from core.rate_limit import limiter
-from routers import admin, analysis, auth, chat, database, files, health, interview_simulation, realtime
+from routers import admin, analysis, auth, chat, files, health, interview_simulation, realtime
 
 logging.basicConfig(level=logging.INFO)
 
@@ -70,4 +70,8 @@ app.include_router(chat.router)
 app.include_router(analysis.router)
 app.include_router(interview_simulation.router)
 app.include_router(realtime.router)
-app.include_router(database.router)
+
+if ENABLE_DB_ADMIN_ROUTES:
+    from routers import database
+
+    app.include_router(database.router)

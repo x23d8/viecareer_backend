@@ -25,6 +25,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
 from config import CLERK_ISSUER, CLERK_JWKS_URL
+from core.database import get_connection
 
 logger = logging.getLogger("viecareer")
 
@@ -58,6 +59,13 @@ class ClerkUser:
     email: Optional[str] = None  # present when Clerk session includes email claim
     role: Optional[str] = None  # sourced from verified Clerk JWT claims only
     public_metadata: dict[str, Any] | None = None
+
+
+@dataclass
+class AdminUser(ClerkUser):
+    internal_user_id: str = ""
+    full_name: str = ""
+    role_id: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -208,17 +216,44 @@ def require_auth(
 def require_admin(
     request: Request,
     current_user: ClerkUser = Depends(require_auth),
-) -> ClerkUser:
+) -> AdminUser:
     """
-    FastAPI dependency - require an authenticated user with admin role.
+    FastAPI dependency - require an authenticated user with admin role_id.
 
-    The role must come from the already verified Clerk JWT. Frontend-only
-    checks such as user.publicMetadata.role are not trusted by backend routes.
+    Admin access is decided by the users table, not by Clerk metadata or
+    frontend state. In the current schema role_id=1 is the admin role.
     """
-    if current_user.role != "admin":
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select id, email, full_name, role_id
+                    from users
+                    where status = 'active'
+                      and (
+                        external_auth_id = %s
+                        or (%s is not null and lower(email) = lower(%s))
+                      )
+                    order by
+                      case when external_auth_id = %s then 0 else 1 end
+                    limit 1
+                    """,
+                    (current_user.user_id, current_user.email, current_user.email, current_user.user_id),
+                )
+                row = cur.fetchone()
+    except Exception as exc:
+        logger.exception("Admin role lookup failed for user=%s", current_user.user_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify admin privileges.",
+        ) from exc
+
+    if not row or row["role_id"] != 1:
         logger.warning(
-            "Admin authorization denied for user=%s role=%s: %s",
+            "Admin authorization denied for user=%s role_id=%s jwt_role=%s: %s",
             current_user.user_id,
+            row["role_id"] if row else "-",
             current_user.role or "-",
             _request_context(request),
         )
@@ -226,7 +261,16 @@ def require_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin privileges required.",
         )
-    return current_user
+
+    return AdminUser(
+        user_id=current_user.user_id,
+        email=row["email"] or current_user.email,
+        role=current_user.role,
+        public_metadata=current_user.public_metadata,
+        internal_user_id=str(row["id"]),
+        full_name=row["full_name"] or "",
+        role_id=row["role_id"],
+    )
 
 
 # ---------------------------------------------------------------------------
