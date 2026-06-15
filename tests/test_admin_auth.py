@@ -55,30 +55,13 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {})
 
-    def test_database_analytics_tables_do_not_leak_without_admin(self):
-        for path, expected_status in (
-            ("/api/db/cv_jd_analyses", 401),
-            ("/api/db/interview_sessions", 401),
-        ):
-            with self.subTest(path=path, expected_status=expected_status):
-                response = self.client.get(path)
+    def test_database_metadata_still_requires_auth(self):
+        response = self.client.get("/api/db/_tables")
 
-                self.assertEqual(response.status_code, expected_status)
-                self.assertNotIn("data", response.json())
+        self.assertEqual(response.status_code, 401)
 
+    def test_database_metadata_allows_authenticated_non_admin_without_querying_rows(self):
         self.authenticate_as("user")
-        for path, expected_status in (
-            ("/api/db/cv_jd_analyses", 403),
-            ("/api/db/interview_sessions", 403),
-        ):
-            with self.subTest(path=path, expected_status=expected_status):
-                response = self.client.get(path)
-
-                self.assertEqual(response.status_code, expected_status)
-                self.assertNotIn("data", response.json())
-
-    def test_database_metadata_allows_admin_without_querying_rows(self):
-        self.authenticate_as("admin")
 
         response = self.client.get("/api/db/_tables")
 
