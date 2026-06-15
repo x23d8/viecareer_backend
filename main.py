@@ -17,7 +17,7 @@ from core.exceptions import (
 )
 from core.middleware import AsyncTimeoutMiddleware, PayloadSizeLimitMiddleware
 from core.rate_limit import limiter
-from routers import analysis, auth, chat, database, files, health, interview_simulation, realtime
+from routers import admin, analysis, auth, chat, database, files, health, interview_simulation, realtime
 
 logging.basicConfig(level=logging.INFO)
 
@@ -63,6 +63,7 @@ def ping():
 
 # ── Routers ─────────────────────────────────────────────────────────────────
 app.include_router(health.router)
+app.include_router(admin.router)
 app.include_router(auth.router)
 app.include_router(files.router)
 app.include_router(chat.router)
