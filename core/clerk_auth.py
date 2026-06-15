@@ -25,6 +25,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
 from config import CLERK_ISSUER, CLERK_JWKS_URL
+from core.database import get_connection
 
 logger = logging.getLogger("viecareer")
 
@@ -56,6 +57,12 @@ def _get_jwks_client() -> PyJWKClient:
 class ClerkUser:
     user_id: str          # Clerk user_id, e.g. "user_2abc..."
     email: Optional[str] = None  # present when Clerk session includes email claim
+
+
+@dataclass
+class AdminUser(ClerkUser):
+    internal_user_id: str = ""
+    role: str = "admin"
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +176,63 @@ def require_auth(
     except HTTPException:
         logger.warning("Authentication rejected bearer token: %s", _request_context(request))
         raise
+
+
+def optional_auth(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+) -> ClerkUser | None:
+    if not credentials or not credentials.credentials:
+        return None
+    try:
+        return _verify_token(credentials.credentials)
+    except HTTPException:
+        logger.info("Optional authentication ignored invalid bearer token: %s", _request_context(request))
+        return None
+
+
+def require_admin(
+    request: Request,
+    current_user: ClerkUser = Depends(require_auth),
+) -> AdminUser:
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select
+                      u.id,
+                      u.email,
+                      r.code as role_code
+                    from users u
+                    join roles r on r.id = u.role_id
+                    where u.external_auth_id = %s
+                      and u.status = 'active'
+                    limit 1
+                    """,
+                    (current_user.user_id,),
+                )
+                row = cur.fetchone()
+    except Exception as exc:
+        logger.exception("Admin role lookup failed for clerk_user_id=%s", current_user.user_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify admin permissions.",
+        ) from exc
+
+    if not row or row["role_code"] != "admin":
+        logger.warning("Admin access denied: %s clerk_user_id=%s", _request_context(request), current_user.user_id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required.",
+        )
+
+    return AdminUser(
+        user_id=current_user.user_id,
+        email=row["email"] or current_user.email,
+        internal_user_id=str(row["id"]),
+        role=row["role_code"],
+    )
 
 
 # ---------------------------------------------------------------------------
