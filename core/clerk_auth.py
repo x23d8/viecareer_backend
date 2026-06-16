@@ -16,7 +16,7 @@ Configuration (backend/.env):
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import jwt
@@ -55,9 +55,9 @@ def _get_jwks_client() -> PyJWKClient:
 
 @dataclass
 class ClerkUser:
-    user_id: str          # Clerk user_id, e.g. "user_2abc..."
-    email: Optional[str] = None  # present when Clerk session includes email claim
-    role: Optional[str] = None  # sourced from verified Clerk JWT claims only
+    user_id: str                              # Clerk user_id, e.g. "user_2abc..."
+    email: Optional[str] = None              # present when Clerk session includes email claim
+    role: Optional[str] = None               # sourced from verified Clerk JWT claims only
     public_metadata: dict[str, Any] | None = None
 
 
@@ -66,6 +66,40 @@ class AdminUser(ClerkUser):
     internal_user_id: str = ""
     full_name: str = ""
     role_id: int = 1
+
+
+# ---------------------------------------------------------------------------
+# JWT claim helpers
+# ---------------------------------------------------------------------------
+
+def _extract_public_metadata(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Return Clerk public metadata from supported JWT claim shapes."""
+    for key in ("public_metadata", "publicMetadata"):
+        metadata = payload.get(key)
+        if isinstance(metadata, dict):
+            return metadata
+    return None
+
+
+def _extract_role(payload: dict[str, Any]) -> str | None:
+    """
+    Extract the application role from verified Clerk JWT claims.
+
+    Supported claim shapes:
+      - {"role": "admin"}
+      - {"public_metadata": {"role": "admin"}}
+      - {"publicMetadata": {"role": "admin"}}
+    """
+    direct_role = payload.get("role")
+    if isinstance(direct_role, str) and direct_role.strip():
+        return direct_role.strip().lower()
+
+    public_metadata = _extract_public_metadata(payload)
+    metadata_role = public_metadata.get("role") if public_metadata else None
+    if isinstance(metadata_role, str) and metadata_role.strip():
+        return metadata_role.strip().lower()
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -140,38 +174,8 @@ def _verify_token(token: str) -> ClerkUser:
     )
 
 
-def _extract_public_metadata(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Return Clerk public metadata from supported JWT claim shapes."""
-    for key in ("public_metadata", "publicMetadata"):
-        metadata = payload.get(key)
-        if isinstance(metadata, dict):
-            return metadata
-    return None
-
-
-def _extract_role(payload: dict[str, Any]) -> str | None:
-    """
-    Extract the application role from verified Clerk JWT claims.
-
-    Supported claim shapes:
-      - {"role": "admin"}
-      - {"public_metadata": {"role": "admin"}}
-      - {"publicMetadata": {"role": "admin"}}
-    """
-    direct_role = payload.get("role")
-    if isinstance(direct_role, str) and direct_role.strip():
-        return direct_role.strip().lower()
-
-    public_metadata = _extract_public_metadata(payload)
-    metadata_role = public_metadata.get("role") if public_metadata else None
-    if isinstance(metadata_role, str) and metadata_role.strip():
-        return metadata_role.strip().lower()
-
-    return None
-
-
 # ---------------------------------------------------------------------------
-# FastAPI HTTP dependency
+# FastAPI HTTP dependencies
 # ---------------------------------------------------------------------------
 
 _bearer = HTTPBearer(auto_error=False)
@@ -213,15 +217,38 @@ def require_auth(
         raise
 
 
+def optional_auth(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+) -> ClerkUser | None:
+    """
+    FastAPI dependency — optionally authenticate via Clerk JWT.
+    Returns None (rather than raising) when the token is absent or invalid.
+
+    Usage:
+        @router.get("/some-endpoint")
+        async def handler(user: ClerkUser | None = Depends(optional_auth)):
+            ...
+    """
+    if not credentials or not credentials.credentials:
+        return None
+    try:
+        return _verify_token(credentials.credentials)
+    except HTTPException:
+        logger.info("Optional authentication ignored invalid bearer token: %s", _request_context(request))
+        return None
+
+
 def require_admin(
     request: Request,
     current_user: ClerkUser = Depends(require_auth),
 ) -> AdminUser:
     """
-    FastAPI dependency - require an authenticated user with admin role_id.
+    FastAPI dependency — require an authenticated user with admin role_id.
 
     Admin access is decided by the users table, not by Clerk metadata or
     frontend state. In the current schema role_id=1 is the admin role.
+    Matches by external_auth_id first, with email as a fallback.
     """
     try:
         with get_connection() as conn:

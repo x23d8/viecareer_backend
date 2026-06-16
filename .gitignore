@@ -1,8 +1,10 @@
 .env
 **/__pycache__/
 __pycache__/
+**/__pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+docs
