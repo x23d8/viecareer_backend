@@ -23,6 +23,7 @@ from schemas.analysis import (
 from services.analysis_service import extract_cvjd, score_interview
 from services.cv_jd_analysis_service import save_cv_jd_analysis
 from services.interview_report_service import save_interview_report
+from services.plan_quota_service import FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, check_plan_quota
 
 router = APIRouter(tags=["analysis"])
 
@@ -36,8 +37,13 @@ async def extract_cvjd_route(
     client=Depends(get_openai_client),
 ):
     """Analyze CV and JD to extract structured profile, ATS score, and gap analysis."""
-    await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
+    await check_plan_quota(
+        external_auth_id=current_user.user_id,
+        feature_code=FEATURE_CV_JD_ANALYSIS,
+        metric=METRIC_COUNT,
+    )
+    await check_daily_quota()
     async with ai_concurrency_limit():
         return {
             "reply": extract_cvjd(

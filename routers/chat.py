@@ -14,6 +14,7 @@ from core.rate_limit import (
 )
 from schemas.chat import ChatRequest
 from services.chat_service import run_chat
+from services.plan_quota_service import FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, check_plan_quota
 
 router = APIRouter(tags=["chat"])
 
@@ -54,8 +55,13 @@ async def chat_viebot(
     client=Depends(get_openai_client),
 ):
     """VieBot — career assistant chatbot."""
-    await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
+    await check_plan_quota(
+        external_auth_id=current_user.user_id,
+        feature_code=FEATURE_CHATBOT,
+        metric=METRIC_MESSAGE_COUNT,
+    )
+    await check_daily_quota()
     async with ai_concurrency_limit():
         reply = run_chat(
             client,

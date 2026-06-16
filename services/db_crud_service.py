@@ -23,7 +23,17 @@ TABLES: tuple[TableMeta, ...] = (
     TableMeta(
         "plans",
         "id",
-        ("id", "code", "name", "monthly_price", "quota_total", "rate_limit_per_minute", "created_at"),
+        (
+            "id",
+            "code",
+            "name",
+            "monthly_price",
+            "quota_total",
+            "rate_limit_per_minute",
+            "billing_period",
+            "included_members",
+            "created_at",
+        ),
     ),
     TableMeta(
         "users",
@@ -64,6 +74,11 @@ TABLES: tuple[TableMeta, ...] = (
         "user_subscriptions",
         "id",
         ("id", "user_id", "plan_id", "status", "start_at", "end_at", "auto_renew", "created_at"),
+    ),
+    TableMeta(
+        "plan_feature_limits",
+        "id",
+        ("id", "plan_id", "feature_code", "metric", "period", "limit_value", "created_at", "updated_at"),
     ),
     TableMeta(
         "auth_sessions",

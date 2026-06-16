@@ -13,6 +13,7 @@ from core.rate_limit import (
     limiter,
     release_ws_slot,
 )
+from services.plan_quota_service import FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, check_plan_quota
 from services.realtime_service import create_realtime_session, relay_realtime_websocket
 
 logger = logging.getLogger("viecareer")
@@ -30,6 +31,11 @@ async def get_realtime_token(
     Create an ephemeral OpenAI Realtime session token.
     Requires a valid Clerk JWT — anonymous callers are rejected.
     """
+    await check_plan_quota(
+        external_auth_id=current_user.user_id,
+        feature_code=FEATURE_REALTIME_INTERVIEW,
+        metric=METRIC_SESSION_COUNT,
+    )
     await check_daily_quota()
     token = create_realtime_session()
     track_user_activity_async(

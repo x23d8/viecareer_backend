@@ -17,6 +17,7 @@ from schemas.interview_simulation import (
     SelectNextQuestionRequest,
 )
 from services.interview_simulation_service import InterviewSimulationService
+from services.plan_quota_service import FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, check_plan_quota
 
 router = APIRouter(prefix="/interview-simulation", tags=["interview-simulation"])
 
@@ -58,8 +59,13 @@ async def generate_coding_plan(
     client=Depends(get_openai_client),
 ):
     """Generate role-specific practical coding challenges."""
-    await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
+    await check_plan_quota(
+        external_auth_id=current_user.user_id,
+        feature_code=FEATURE_CODING_PLAN,
+        metric=METRIC_GENERATION_COUNT,
+    )
+    await check_daily_quota()
     async with ai_concurrency_limit():
         service = InterviewSimulationService(
             client,
