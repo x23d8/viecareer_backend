@@ -1,8 +1,6 @@
 """Compact Swagger CRUD endpoints for Supabase database tables.
 
-These endpoints are restricted to authenticated users only.
-For full admin-only access control, add a role check against the database
-(e.g., check users.role = 'admin') once a role system is established.
+These endpoints are restricted to authenticated users.
 """
 
 from typing import Any

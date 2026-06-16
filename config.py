@@ -8,6 +8,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ---------------------------------------------------------------------------
+# Runtime environment
+# ---------------------------------------------------------------------------
+
+APP_ENV: str = os.getenv("APP_ENV", "production").lower()
+
+ENABLE_DB_ADMIN_ROUTES: bool = os.getenv("ENABLE_DB_ADMIN_ROUTES", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+# ---------------------------------------------------------------------------
 # OpenAI
 # ---------------------------------------------------------------------------
 

@@ -9,7 +9,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from config import CORS_ORIGIN_REGEX, CORS_ORIGINS
+from config import CORS_ORIGIN_REGEX, CORS_ORIGINS, ENABLE_DB_ADMIN_ROUTES
 from core.exceptions import (
     http_exception_handler,
     unhandled_exception_handler,
@@ -63,6 +63,7 @@ def ping():
 
 # ── Routers ─────────────────────────────────────────────────────────────────
 app.include_router(health.router)
+app.include_router(admin.router)
 app.include_router(auth.router)
 app.include_router(events.router)
 app.include_router(admin.router)
@@ -71,4 +72,8 @@ app.include_router(chat.router)
 app.include_router(analysis.router)
 app.include_router(interview_simulation.router)
 app.include_router(realtime.router)
-app.include_router(database.router)
+
+if ENABLE_DB_ADMIN_ROUTES:
+    from routers import database
+
+    app.include_router(database.router)

@@ -37,6 +37,10 @@ create table if not exists users (
 
 alter table users add column if not exists external_auth_id varchar(255);
 alter table users add column if not exists auth_provider varchar(50) null default 'clerk';
+alter table users add column if not exists terms_accepted_at timestamptz null;
+alter table users add column if not exists terms_version varchar(50) null;
+alter table users add column if not exists privacy_policy_accepted_at timestamptz null;
+alter table users add column if not exists privacy_policy_version varchar(50) null;
 
 create unique index if not exists idx_users_external_auth_id
   on users (external_auth_id)

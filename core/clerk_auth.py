@@ -17,7 +17,7 @@ Configuration (backend/.env):
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import jwt
 from fastapi import Depends, HTTPException, Query, Request, WebSocket, status
@@ -57,12 +57,15 @@ def _get_jwks_client() -> PyJWKClient:
 class ClerkUser:
     user_id: str          # Clerk user_id, e.g. "user_2abc..."
     email: Optional[str] = None  # present when Clerk session includes email claim
+    role: Optional[str] = None  # sourced from verified Clerk JWT claims only
+    public_metadata: dict[str, Any] | None = None
 
 
 @dataclass
 class AdminUser(ClerkUser):
     internal_user_id: str = ""
-    role: str = "admin"
+    full_name: str = ""
+    role_id: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +135,39 @@ def _verify_token(token: str) -> ClerkUser:
     return ClerkUser(
         user_id=user_id,
         email=payload.get("email"),
+        role=_extract_role(payload),
+        public_metadata=_extract_public_metadata(payload),
     )
+
+
+def _extract_public_metadata(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Return Clerk public metadata from supported JWT claim shapes."""
+    for key in ("public_metadata", "publicMetadata"):
+        metadata = payload.get(key)
+        if isinstance(metadata, dict):
+            return metadata
+    return None
+
+
+def _extract_role(payload: dict[str, Any]) -> str | None:
+    """
+    Extract the application role from verified Clerk JWT claims.
+
+    Supported claim shapes:
+      - {"role": "admin"}
+      - {"public_metadata": {"role": "admin"}}
+      - {"publicMetadata": {"role": "admin"}}
+    """
+    direct_role = payload.get("role")
+    if isinstance(direct_role, str) and direct_role.strip():
+        return direct_role.strip().lower()
+
+    public_metadata = _extract_public_metadata(payload)
+    metadata_role = public_metadata.get("role") if public_metadata else None
+    if isinstance(metadata_role, str) and metadata_role.strip():
+        return metadata_role.strip().lower()
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -178,60 +213,63 @@ def require_auth(
         raise
 
 
-def optional_auth(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
-) -> ClerkUser | None:
-    if not credentials or not credentials.credentials:
-        return None
-    try:
-        return _verify_token(credentials.credentials)
-    except HTTPException:
-        logger.info("Optional authentication ignored invalid bearer token: %s", _request_context(request))
-        return None
-
-
 def require_admin(
     request: Request,
     current_user: ClerkUser = Depends(require_auth),
 ) -> AdminUser:
+    """
+    FastAPI dependency - require an authenticated user with admin role_id.
+
+    Admin access is decided by the users table, not by Clerk metadata or
+    frontend state. In the current schema role_id=1 is the admin role.
+    """
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    select
-                      u.id,
-                      u.email,
-                      r.code as role_code
-                    from users u
-                    join roles r on r.id = u.role_id
-                    where u.external_auth_id = %s
-                      and u.status = 'active'
+                    select id, email, full_name, role_id
+                    from users
+                    where status = 'active'
+                      and (
+                        external_auth_id = %s
+                        or (%s is not null and lower(email) = lower(%s))
+                      )
+                    order by
+                      case when external_auth_id = %s then 0 else 1 end
                     limit 1
                     """,
-                    (current_user.user_id,),
+                    (current_user.user_id, current_user.email, current_user.email, current_user.user_id),
                 )
                 row = cur.fetchone()
     except Exception as exc:
-        logger.exception("Admin role lookup failed for clerk_user_id=%s", current_user.user_id)
+        logger.exception("Admin role lookup failed for user=%s", current_user.user_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not verify admin permissions.",
+            detail="Could not verify admin privileges.",
         ) from exc
 
-    if not row or row["role_code"] != "admin":
-        logger.warning("Admin access denied: %s clerk_user_id=%s", _request_context(request), current_user.user_id)
+    if not row or row["role_id"] != 1:
+        logger.warning(
+            "Admin authorization denied for user=%s role_id=%s jwt_role=%s: %s",
+            current_user.user_id,
+            row["role_id"] if row else "-",
+            current_user.role or "-",
+            _request_context(request),
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required.",
+            detail="Admin privileges required.",
         )
 
     return AdminUser(
         user_id=current_user.user_id,
         email=row["email"] or current_user.email,
+        role=current_user.role,
+        public_metadata=current_user.public_metadata,
         internal_user_id=str(row["id"]),
-        role=row["role_code"],
+        full_name=row["full_name"] or "",
+        role_id=row["role_id"],
     )
 
 

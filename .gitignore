@@ -1,2 +1,8 @@
 .env
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 docs
