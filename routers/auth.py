@@ -14,8 +14,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from core.clerk_auth import ClerkUser, require_auth
 from core.rate_limit import limiter
-from schemas.auth import AuthSyncUserRequest
-from services.user_service import upsert_auth_user
+from schemas.auth import AcceptLegalPoliciesRequest, AuthSyncUserRequest
+from services.user_service import accept_legal_policies, get_legal_acceptance_status, upsert_auth_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -50,3 +50,32 @@ async def sync_user(
         auth_provider=body.auth_provider,
     )
     return {"data": user}
+
+
+@router.get("/legal-status")
+@limiter.limit("60/minute")
+async def legal_status(
+    request: Request,
+    current_user: ClerkUser = Depends(require_auth),
+) -> dict[str, Any]:
+    status_payload = get_legal_acceptance_status(
+        external_auth_id=current_user.user_id,
+        email=current_user.email,
+    )
+    return {"data": status_payload}
+
+
+@router.post("/accept-legal")
+@limiter.limit("20/minute")
+async def accept_legal(
+    request: Request,
+    body: AcceptLegalPoliciesRequest,
+    current_user: ClerkUser = Depends(require_auth),
+) -> dict[str, Any]:
+    status_payload = accept_legal_policies(
+        external_auth_id=current_user.user_id,
+        email=current_user.email,
+        terms_version=body.terms_version,
+        privacy_policy_version=body.privacy_policy_version,
+    )
+    return {"data": status_payload}

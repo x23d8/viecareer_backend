@@ -34,3 +34,8 @@ class AuthSyncUserRequest(BaseModel):
     email: EmailStr
     avatar_url: str | None = None
     auth_provider: str = "clerk"
+
+
+class AcceptLegalPoliciesRequest(BaseModel):
+    terms_version: str = Field(..., min_length=1)
+    privacy_policy_version: str = Field(..., min_length=1)
