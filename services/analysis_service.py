@@ -2,12 +2,17 @@
 
 from typing import Optional
 
+from core.api_usage import UsageContext
 from core.llm_json import json_completion
 from core.prompts import load_prompt
 from schemas.analysis import ExtractCVJDRequest, ScoreInterviewRequest
 
 
-def extract_cvjd(client, req: ExtractCVJDRequest) -> Optional[str]:
+def extract_cvjd(
+    client,
+    req: ExtractCVJDRequest,
+    usage_context: UsageContext | None = None,
+) -> Optional[str]:
     """Analyze CV and JD to extract structured profile, ATS score, and gap analysis."""
     user_prompt = f"""Analyze the following CV and Job Description, then return a JSON object with these exact fields:
 
@@ -90,10 +95,20 @@ JD Content:
 
 Return ONLY the JSON object."""
 
-    return json_completion(client, load_prompt("cv_extractor"), user_prompt, max_tokens=3000)
+    return json_completion(
+        client,
+        load_prompt("cv_extractor"),
+        user_prompt,
+        max_tokens=3000,
+        usage_context=usage_context,
+    )
 
 
-def score_interview(client, req: ScoreInterviewRequest) -> Optional[str]:
+def score_interview(
+    client,
+    req: ScoreInterviewRequest,
+    usage_context: UsageContext | None = None,
+) -> Optional[str]:
     """Score interview Q&A pairs across 5 dimensions and return detailed analysis."""
     qa_text = "\n\n".join(
         f"Q{i + 1} [{qa.get('timestamp', '00:00')}]: {qa['question']}\nA{i + 1}: {qa['answer']}"
@@ -154,4 +169,10 @@ Dimension rules:
 
 Return ONLY the JSON object."""
 
-    return json_completion(client, load_prompt("interview_scorer"), user_prompt, max_tokens=3000)
+    return json_completion(
+        client,
+        load_prompt("interview_scorer"),
+        user_prompt,
+        max_tokens=3000,
+        usage_context=usage_context,
+    )

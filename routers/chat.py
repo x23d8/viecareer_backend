@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, Request
 
+from core.api_usage import usage_context
 from core.clerk_auth import ClerkUser, require_auth
 from core.openai_client import get_openai_client
 from core.prompts import load_prompt
@@ -35,6 +36,11 @@ async def chat(
             message=req.message,
             history=req.history,
             max_tokens=300,
+            usage_context=usage_context(
+                feature="chat_generic",
+                external_auth_id=current_user.user_id,
+                meta={"endpoint": "/chat"},
+            ),
         )
     return {"reply": reply}
 
@@ -57,6 +63,11 @@ async def chat_viebot(
             message=req.message,
             history=req.history,
             max_tokens=500,
+            usage_context=usage_context(
+                feature="chat_viebot",
+                external_auth_id=current_user.user_id,
+                meta={"endpoint": "/chat/viebot"},
+            ),
         )
     return {"reply": reply}
 
@@ -79,5 +90,10 @@ async def chat_interview(
             message=req.message,
             history=req.history,
             max_tokens=500,
+            usage_context=usage_context(
+                feature="chat_interview",
+                external_auth_id=current_user.user_id,
+                meta={"endpoint": "/chat/interview"},
+            ),
         )
     return {"reply": reply}

@@ -1,7 +1,10 @@
 """Analysis endpoints — CV/JD extraction and interview scoring."""
 
+import time
+
 from fastapi import APIRouter, Depends, Request
 
+from core.api_usage import track_user_activity_async, usage_context
 from core.clerk_auth import ClerkUser, require_auth
 from core.openai_client import get_openai_client
 from core.rate_limit import (
@@ -36,7 +39,21 @@ async def extract_cvjd_route(
     await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():
-        return {"reply": extract_cvjd(client, req)}
+        return {
+            "reply": extract_cvjd(
+                client,
+                req,
+                usage_context=usage_context(
+                    feature="cvjd_extract",
+                    external_auth_id=current_user.user_id,
+                    meta={
+                        "endpoint": "/extract-cvjd",
+                        "cv_chars": len(req.cv_text or ""),
+                        "jd_chars": len(req.jd_text or ""),
+                    },
+                ),
+            )
+        }
 
 
 @router.post("/cv-jd-analyses")
@@ -47,6 +64,7 @@ async def save_cv_jd_analysis_route(
     current_user: ClerkUser = Depends(require_auth),
 ):
     """Persist an already-extracted CV/JD analysis for the authenticated user."""
+    started_at = time.perf_counter()
     # Ensure users can only save their own analyses
     if current_user.user_id != req.external_auth_id:
         from fastapi import HTTPException, status
@@ -58,6 +76,17 @@ async def save_cv_jd_analysis_route(
         avatar_url=req.avatar_url,
         auth_provider=req.auth_provider,
         analysis=req.analysis,
+    )
+    track_user_activity_async(
+        "cvjd_saved",
+        external_auth_id=current_user.user_id,
+        object_type="cv_jd_analysis",
+        object_id=str(row.get("id") or ""),
+        duration_ms=int((time.perf_counter() - started_at) * 1000),
+        meta={
+            "target_position": req.analysis.get("targetPosition"),
+            "ats_score": req.analysis.get("atsScore"),
+        },
     )
     return {"data": row}
 
@@ -74,7 +103,24 @@ async def score_interview_route(
     await check_daily_quota()
     await check_user_limit_score(current_user.user_id)
     async with ai_concurrency_limit():
-        return {"reply": score_interview(client, req)}
+        return {
+            "reply": score_interview(
+                client,
+                req,
+                usage_context=usage_context(
+                    feature="interview_score",
+                    external_auth_id=current_user.user_id,
+                    related_type="cv_jd_analysis" if req.cv_jd_analysis_id else None,
+                    related_id=req.cv_jd_analysis_id,
+                    meta={
+                        "endpoint": "/score-interview",
+                        "qa_count": len(req.qa_pairs or []),
+                        "transcript_events": len(req.transcript_events or []),
+                        "position": req.position,
+                    },
+                ),
+            )
+        }
 
 
 @router.post("/interview-reports")
@@ -85,6 +131,7 @@ async def save_interview_report_route(
     current_user: ClerkUser = Depends(require_auth),
 ):
     """Persist a completed interview report, including transcript events and final dimensions."""
+    started_at = time.perf_counter()
     # Ensure users can only save their own reports
     if current_user.user_id != req.external_auth_id:
         from fastapi import HTTPException, status
@@ -107,5 +154,19 @@ async def save_interview_report_route(
         interview_dimensions=req.interview_dimensions,
         final_dimensions=req.final_dimensions,
         phase2_signals=req.phase2_signals,
+    )
+    track_user_activity_async(
+        "report_saved",
+        external_auth_id=current_user.user_id,
+        object_type="interview_session",
+        object_id=str(row.get("id") or ""),
+        duration_ms=int((time.perf_counter() - started_at) * 1000),
+        meta={
+            "position": req.position,
+            "duration_seconds": req.duration_seconds,
+            "overall_score": req.overall_score,
+            "qa_count": len(req.scored_qa or []),
+            "transcript_events": len(req.transcript_events or []),
+        },
     )
     return {"data": row}
