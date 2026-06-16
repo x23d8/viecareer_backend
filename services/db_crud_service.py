@@ -329,6 +329,8 @@ TABLES: tuple[TableMeta, ...] = (
             "meta_json",
         ),
         ("meta_json",),
+    ),
+    TableMeta(
         "landing_events",
         "id",
         (
