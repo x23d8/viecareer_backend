@@ -310,6 +310,28 @@ create table if not exists activity_logs (
   created_at timestamptz not null default now()
 );
 
+create table if not exists landing_events (
+  id uuid primary key default gen_random_uuid(),
+  visitor_id varchar(100) not null,
+  user_id uuid null references users(id) on delete set null,
+  event_name varchar(50) not null check (
+    event_name in ('landing_view', 'pricing_click', 'signup_click', 'login_click')
+  ),
+  source varchar(50) not null default 'direct' check (
+    source in ('facebook', 'tiktok', 'google', 'direct', 'other')
+  ),
+  utm_source varchar(100) null,
+  utm_medium varchar(100) null,
+  utm_campaign varchar(150) null,
+  referrer text null,
+  path text null,
+  target_path text null,
+  pricing_plan_code varchar(50) null,
+  ip_address varchar(64) null,
+  user_agent text null,
+  created_at timestamptz not null default now()
+);
+
 -- Recommended indexes
 create index if not exists idx_interview_sessions_user_created
   on interview_sessions (user_id, created_at desc);
@@ -328,6 +350,18 @@ create index if not exists idx_cv_jd_analyses_user_created
 
 create index if not exists idx_uploaded_files_user_created
   on uploaded_files (user_id, created_at desc);
+
+create index if not exists idx_landing_events_created
+  on landing_events (created_at desc);
+
+create index if not exists idx_landing_events_source_created
+  on landing_events (source, created_at desc);
+
+create index if not exists idx_landing_events_event_created
+  on landing_events (event_name, created_at desc);
+
+create index if not exists idx_landing_events_visitor_created
+  on landing_events (visitor_id, created_at desc);
 
 -- Optional seed data
 insert into roles (code, name)
