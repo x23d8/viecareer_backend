@@ -28,7 +28,10 @@ _schema_ready = False
 
 DEFAULT_MODEL_PRICING: dict[str, dict[str, float]] = {
     # USD per 1M text tokens. Override with OPENAI_PRICING_JSON when prices change.
+    "gpt-4o": {"input_per_1m": 2.50, "output_per_1m": 10.00},
     "gpt-4o-mini": {"input_per_1m": 0.15, "output_per_1m": 0.60},
+    "gpt-realtime-2": {"input_per_1m": 4.00, "output_per_1m": 24.00},
+    "gpt-realtime-mini": {"input_per_1m": 4.00, "output_per_1m": 24.00},
 }
 
 
