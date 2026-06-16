@@ -286,6 +286,27 @@ TABLES: tuple[TableMeta, ...] = (
         ),
         ("meta_json",),
     ),
+    TableMeta(
+        "landing_events",
+        "id",
+        (
+            "id",
+            "visitor_id",
+            "user_id",
+            "event_name",
+            "source",
+            "utm_source",
+            "utm_medium",
+            "utm_campaign",
+            "referrer",
+            "path",
+            "target_path",
+            "pricing_plan_code",
+            "ip_address",
+            "user_agent",
+            "created_at",
+        ),
+    ),
 )
 
 TABLE_BY_NAME = {table.name: table for table in TABLES}
