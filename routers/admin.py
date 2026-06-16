@@ -32,6 +32,7 @@ def get_admin_overview(current_admin: AdminUser = Depends(require_admin)):
             "current_admin": _admin_payload(current_admin),
             "dashboard": {},
         }
+    }
 @router.get("/landing-metrics")
 @limiter.limit("30/minute")
 def landing_metrics(
