@@ -13,6 +13,7 @@ Layers implemented:
 
 import asyncio
 import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -111,7 +112,7 @@ _daily_quota = _DailyQuota()
 _daily_lock = asyncio.Lock()
 
 # Hard cap: total AI calls across ALL users per calendar day (UTC)
-DAILY_AI_QUOTA = 2_000  # adjust to your budget
+DAILY_AI_QUOTA = int(os.getenv("DAILY_AI_QUOTA", "2000"))  # adjust to your budget
 
 
 async def check_daily_quota() -> None:

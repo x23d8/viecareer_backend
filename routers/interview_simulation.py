@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, Request
 
+from core.api_usage import usage_context
 from core.clerk_auth import ClerkUser, require_auth
 from core.openai_client import get_openai_client
 from core.rate_limit import (
@@ -32,7 +33,19 @@ async def generate_interview_blueprint(
     await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():
-        service = InterviewSimulationService(client)
+        service = InterviewSimulationService(
+            client,
+            usage_context=usage_context(
+                feature="interview_blueprint",
+                external_auth_id=current_user.user_id,
+                meta={
+                    "endpoint": "/interview-simulation/blueprint",
+                    "target_question_count": req.target_question_count,
+                    "language": req.language,
+                    "interview_style": req.interview_style,
+                },
+            ),
+        )
         return {"data": service.generate_blueprint(req)}
 
 
@@ -48,7 +61,19 @@ async def generate_coding_plan(
     await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():
-        service = InterviewSimulationService(client)
+        service = InterviewSimulationService(
+            client,
+            usage_context=usage_context(
+                feature="coding_plan",
+                external_auth_id=current_user.user_id,
+                meta={
+                    "endpoint": "/interview-simulation/coding-plan",
+                    "challenge_count": req.challenge_count,
+                    "language": req.language,
+                    "role_level": req.role_level,
+                },
+            ),
+        )
         return {"data": service.generate_coding_plan(req)}
 
 
@@ -63,5 +88,16 @@ async def select_next_question(
     """Select the next adaptive question from a generated blueprint and transcript."""
     await check_daily_quota()
     async with ai_concurrency_limit():
-        service = InterviewSimulationService(client)
+        service = InterviewSimulationService(
+            client,
+            usage_context=usage_context(
+                feature="next_question",
+                external_auth_id=current_user.user_id,
+                meta={
+                    "endpoint": "/interview-simulation/next-question",
+                    "answered_questions": len(req.answered_question_ids or []),
+                    "transcript_turns": len(req.transcript or []),
+                },
+            ),
+        )
         return {"data": service.select_next_question(req)}

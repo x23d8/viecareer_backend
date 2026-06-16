@@ -314,6 +314,40 @@ create table if not exists activity_logs (
   created_at timestamptz not null default now()
 );
 
+create table if not exists api_usage_logs (
+  id bigserial primary key,
+  occurred_at timestamptz not null default now(),
+  user_id uuid null references users(id) on delete set null,
+  external_auth_id varchar(255) null,
+  provider varchar(30) not null default 'openai',
+  model varchar(100) not null,
+  feature varchar(60) not null,
+  related_type varchar(40) null,
+  related_id uuid null,
+  status varchar(20) not null check (status in ('success', 'error', 'cancelled')),
+  prompt_tokens int not null default 0,
+  completion_tokens int not null default 0,
+  total_tokens int not null default 0,
+  input_audio_seconds int null,
+  output_audio_seconds int null,
+  cost_usd numeric(12,6) null,
+  duration_ms int null,
+  error_code varchar(80) null,
+  meta_json jsonb null
+);
+
+create table if not exists user_activity_events (
+  id bigserial primary key,
+  occurred_at timestamptz not null default now(),
+  user_id uuid null references users(id) on delete set null,
+  external_auth_id varchar(255) null,
+  event_name varchar(80) not null,
+  object_type varchar(40) null,
+  object_id uuid null,
+  source varchar(20) not null default 'backend',
+  success boolean not null default true,
+  duration_ms int null,
+  meta_json jsonb null
 create table if not exists landing_events (
   id uuid primary key default gen_random_uuid(),
   visitor_id varchar(100) not null,
@@ -355,6 +389,17 @@ create index if not exists idx_cv_jd_analyses_user_created
 create index if not exists idx_uploaded_files_user_created
   on uploaded_files (user_id, created_at desc);
 
+create index if not exists idx_api_usage_logs_user_time
+  on api_usage_logs (user_id, occurred_at desc);
+
+create index if not exists idx_api_usage_logs_feature_time
+  on api_usage_logs (feature, occurred_at desc);
+
+create index if not exists idx_user_activity_events_user_time
+  on user_activity_events (user_id, occurred_at desc);
+
+create index if not exists idx_user_activity_events_name_time
+  on user_activity_events (event_name, occurred_at desc);
 create index if not exists idx_landing_events_created
   on landing_events (created_at desc);
 

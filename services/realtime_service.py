@@ -4,10 +4,12 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
 
@@ -17,6 +19,7 @@ from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from config import OPENAI_API_KEY, OPENAI_REALTIME_MODEL
+from core.api_usage import track_openai_usage_async, track_user_activity_async, usage_context
 from core.openai_client import get_openai_client
 from core.prompts import load_prompt
 from schemas.interview_simulation import SelectNextQuestionRequest
@@ -89,6 +92,7 @@ def create_realtime_session() -> dict:
 @dataclass
 class _RelayState:
     started_at: float = field(default_factory=time.monotonic)
+    auth_external_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str | None = None
     event_order: int = 0
@@ -102,12 +106,15 @@ class _RelayState:
     answered_question_ids: list[str] = field(default_factory=list)
     covered_topics: list[str] = field(default_factory=list)
     initialized: bool = False
+    completed: bool = False
+    realtime_usage_logged: bool = False
+    realtime_estimate_logged: bool = False
 
     def timestamp_sec(self) -> int:
         return max(0, int(time.monotonic() - self.started_at))
 
 
-async def relay_realtime_websocket(websocket: WebSocket) -> None:
+async def relay_realtime_websocket(websocket: WebSocket, auth_external_id: str | None = None) -> None:
     """Relay browser mic audio to OpenAI Realtime and stream model audio back."""
     await websocket.accept()
 
@@ -116,7 +123,7 @@ async def relay_realtime_websocket(websocket: WebSocket) -> None:
         await websocket.close(code=1011)
         return
 
-    state = _RelayState()
+    state = _RelayState(auth_external_id=auth_external_id)
     model = quote(OPENAI_REALTIME_MODEL, safe="")
     openai_url = f"{_REALTIME_WEBSOCKET_URL}?model={model}"
 
@@ -147,6 +154,11 @@ async def relay_realtime_websocket(websocket: WebSocket) -> None:
     except Exception as exc:
         logger.exception("Realtime relay failed")
         await _send_client_error(websocket, f"Realtime relay failed: {exc}")
+    finally:
+        if state.initialized and not state.completed:
+            duration_seconds = state.timestamp_sec()
+            await asyncio.to_thread(_complete_live_session_safe, state.session_id, duration_seconds)
+            _track_realtime_session_estimate(state, duration_seconds)
 
 
 async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState) -> None:
@@ -177,6 +189,11 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                 await openai_ws.close(code=1008, reason="Invalid session metadata")
                 return
 
+            if state.auth_external_id and validated.external_auth_id != state.auth_external_id:
+                await _send_client_error(websocket, "Realtime metadata user does not match the authenticated user")
+                await openai_ws.close(code=1008, reason="User mismatch")
+                return
+
             state.metadata = validated.model_dump(mode="json")
             state.blueprint = _coerce_blueprint(state.metadata.get("blueprint"))
             state.session_id = await asyncio.to_thread(_create_live_session_safe, state.metadata)
@@ -194,11 +211,36 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                     "context_version": 1,
                 }
             )
+            track_user_activity_async(
+                "interview_started",
+                external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+                object_type="interview_session",
+                object_id=state.session_id,
+                meta={
+                    "position": state.metadata.get("position"),
+                    "language": state.metadata.get("language"),
+                    "interview_style": state.metadata.get("interview_style"),
+                    "question_count": len((state.blueprint or {}).get("questions") or []),
+                },
+            )
             continue
 
         if event_type == "client.stop":
             duration_seconds = _int_or_none(event.get("duration_seconds"))
             await asyncio.to_thread(_complete_live_session_safe, state.session_id, duration_seconds)
+            state.completed = True
+            track_user_activity_async(
+                "interview_completed",
+                external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+                object_type="interview_session",
+                object_id=state.session_id,
+                meta={
+                    "duration_seconds": duration_seconds,
+                    "questions_asked": state.question_order,
+                    "transcript_turns": len(state.transcript),
+                },
+            )
+            _track_realtime_session_estimate(state, duration_seconds)
             await openai_ws.close()
             return
 
@@ -215,6 +257,29 @@ async def _openai_to_client(websocket: WebSocket, openai_ws, state: _RelayState)
 async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_ws) -> None:
     event = _json_object(raw_message)
     event_type = event.get("type")
+
+    if event_type == "response.done":
+        has_usage = _event_has_usage(event)
+        track_openai_usage_async(
+            event,
+            usage_context(
+                feature="realtime_response",
+                external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+                related_type="interview_session",
+                related_id=state.session_id,
+                meta={
+                    "event_type": event_type,
+                    "question_order": state.question_order,
+                    "transcript_turns": len(state.transcript),
+                    "usage_source": "openai",
+                },
+            ),
+            model=OPENAI_REALTIME_MODEL,
+            skip_without_usage=True,
+        )
+        if has_usage:
+            state.realtime_usage_logged = True
+        return
 
     if event_type in {"response.output_audio_transcript.done", "response.audio_transcript.done"}:
         text = str(event.get("transcript") or "").strip()
@@ -385,7 +450,20 @@ def _select_next_question_safe(state: _RelayState) -> dict[str, Any] | None:
             covered_topics=state.covered_topics,
             language=state.metadata.get("language", "en"),
         )
-        decision = InterviewSimulationService(get_openai_client()).select_next_question(req)
+        decision = InterviewSimulationService(
+            get_openai_client(),
+            usage_context=usage_context(
+                feature="next_question",
+                external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+                related_type="interview_session",
+                related_id=state.session_id,
+                meta={
+                    "source": "realtime",
+                    "answered_questions": len(state.answered_question_ids),
+                    "transcript_turns": len(state.transcript),
+                },
+            ),
+        ).select_next_question(req)
     except Exception:
         logger.exception("Could not select adaptive interview question")
         return _first_unanswered_question(state)
@@ -641,6 +719,89 @@ def _transcript_event(state: _RelayState, role: str, text: str) -> dict[str, Any
         "timestamp_sec": state.timestamp_sec(),
         "question_order": state.question_order if state.question_order else None,
     }
+
+
+def _event_has_usage(event: dict[str, Any]) -> bool:
+    if event.get("usage"):
+        return True
+    response = event.get("response")
+    return isinstance(response, dict) and bool(response.get("usage"))
+
+
+def _track_realtime_session_estimate(state: _RelayState, duration_seconds: int | None) -> None:
+    if state.realtime_usage_logged or state.realtime_estimate_logged or not state.session_id:
+        return
+
+    input_chars = sum(
+        len(str(turn.get("text") or ""))
+        for turn in state.transcript
+        if turn.get("role") == "user"
+    )
+    output_chars = sum(
+        len(str(turn.get("text") or ""))
+        for turn in state.transcript
+        if turn.get("role") == "assistant"
+    )
+    prompt_tokens = _estimate_text_tokens(input_chars)
+    completion_tokens = _estimate_text_tokens(output_chars)
+    total_tokens = prompt_tokens + completion_tokens
+    duration = max(0, int(duration_seconds or state.timestamp_sec()))
+    if total_tokens <= 0 and duration > 0:
+        prompt_tokens = max(1, duration * 2)
+        completion_tokens = max(1, duration * 2)
+        total_tokens = prompt_tokens + completion_tokens
+
+    cost_override = _estimated_realtime_cost(duration)
+    track_openai_usage_async(
+        {
+            "model": OPENAI_REALTIME_MODEL,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "input_audio_seconds": duration,
+                "output_audio_seconds": duration,
+            },
+        },
+        usage_context(
+            feature="realtime_session",
+            external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+            related_type="interview_session",
+            related_id=state.session_id,
+            meta={
+                "usage_source": "estimated",
+                "estimate_method": "transcript_chars_div_4_with_duration_fallback",
+                "cost_source": "OPENAI_REALTIME_ESTIMATED_COST_PER_MINUTE_USD"
+                if cost_override is not None
+                else "model_pricing_or_null",
+                "duration_seconds": duration,
+                "questions_asked": state.question_order,
+                "transcript_turns": len(state.transcript),
+            },
+        ),
+        model=OPENAI_REALTIME_MODEL,
+        cost_usd_override=cost_override,
+    )
+    state.realtime_estimate_logged = True
+
+
+def _estimate_text_tokens(char_count: int) -> int:
+    if char_count <= 0:
+        return 0
+    return max(1, round(char_count / 4))
+
+
+def _estimated_realtime_cost(duration_seconds: int) -> Decimal | None:
+    raw_rate = os.getenv("OPENAI_REALTIME_ESTIMATED_COST_PER_MINUTE_USD", "").strip()
+    if not raw_rate:
+        return None
+    try:
+        rate = Decimal(raw_rate)
+    except (InvalidOperation, ValueError):
+        logger.warning("OPENAI_REALTIME_ESTIMATED_COST_PER_MINUTE_USD is invalid")
+        return None
+    minutes = Decimal(max(0, duration_seconds)) / Decimal("60")
+    return (minutes * rate).quantize(Decimal("0.000001"))
 
 
 def _create_live_session_safe(metadata: dict[str, Any]) -> str | None:

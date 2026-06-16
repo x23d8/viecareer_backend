@@ -4,6 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Request, WebSocket
 
+from core.api_usage import track_user_activity_async
 from core.clerk_auth import ClerkUser, require_auth, verify_ws_token
 from core.rate_limit import (
     WS_MAX_PER_IP,
@@ -30,7 +31,13 @@ async def get_realtime_token(
     Requires a valid Clerk JWT — anonymous callers are rejected.
     """
     await check_daily_quota()
-    return create_realtime_session()
+    token = create_realtime_session()
+    track_user_activity_async(
+        "realtime_token_created",
+        external_auth_id=current_user.user_id,
+        meta={"endpoint": "/realtime-token"},
+    )
+    return token
 
 
 @router.websocket("/realtime/ws")
@@ -65,6 +72,6 @@ async def realtime_websocket(
         return
 
     try:
-        await relay_realtime_websocket(websocket)
+        await relay_realtime_websocket(websocket, auth_external_id=current_user.user_id)
     finally:
         await release_ws_slot(client_ip)

@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from core.api_usage import UsageContext
 from core.llm_json import json_completion
 from core.prompts import load_prompt
 from schemas.interview_simulation import (
@@ -21,8 +22,9 @@ logger = logging.getLogger("viecareer")
 class InterviewSimulationService:
     """Coordinates the interview simulation use cases without frontend assumptions."""
 
-    def __init__(self, client):
+    def __init__(self, client, usage_context: UsageContext | None = None):
         self.client = client
+        self.usage_context = usage_context
 
     def generate_blueprint(self, req: GenerateInterviewBlueprintRequest) -> dict[str, Any]:
         prompt = _blueprint_prompt(req)
@@ -31,6 +33,7 @@ class InterviewSimulationService:
             load_prompt("interview_blueprint_designer"),
             prompt,
             max_tokens=5000,
+            usage_context=self.usage_context,
         )
         blueprint = _parse_json_object(raw)
         return _normalize_blueprint(blueprint, req.target_question_count)
@@ -42,6 +45,7 @@ class InterviewSimulationService:
             load_prompt("coding_plan_designer"),
             prompt,
             max_tokens=3500,
+            usage_context=self.usage_context,
         )
         return _normalize_coding_plan(_parse_json_object(raw), req.challenge_count)
 
@@ -84,6 +88,7 @@ class InterviewSimulationService:
             load_prompt("adaptive_question_selector"),
             prompt,
             max_tokens=1800,
+            usage_context=self.usage_context,
         )
         decision = _parse_json_object(raw)
         return _repair_selected_question(decision, available)
