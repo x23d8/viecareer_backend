@@ -115,6 +115,35 @@ def track_openai_usage_async(
     _submit(_insert_api_usage, record)
 
 
+def track_blocked_ai_usage_async(
+    context: UsageContext | None,
+    *,
+    error_code: str,
+    model: str = "none",
+    duration_ms: int | None = None,
+    meta: dict[str, Any] | None = None,
+) -> None:
+    """Record an AI request blocked before provider execution."""
+
+    track_openai_usage_async(
+        {
+            "model": model,
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        },
+        context,
+        status="blocked",
+        model=model,
+        duration_ms=duration_ms,
+        error_code=error_code,
+        meta=meta,
+        cost_usd_override=0,
+    )
+
+
 def track_user_activity_async(
     event_name: str,
     *,
@@ -296,7 +325,7 @@ def _ensure_tracking_schema(cur) -> None:
               feature varchar(60) not null,
               related_type varchar(40) null,
               related_id uuid null,
-              status varchar(20) not null check (status in ('success', 'error', 'cancelled')),
+              status varchar(20) not null check (status in ('success', 'error', 'cancelled', 'blocked')),
               prompt_tokens int not null default 0,
               completion_tokens int not null default 0,
               total_tokens int not null default 0,
@@ -307,6 +336,14 @@ def _ensure_tracking_schema(cur) -> None:
               error_code varchar(80) null,
               meta_json jsonb null
             )
+            """
+        )
+        cur.execute("alter table api_usage_logs drop constraint if exists api_usage_logs_status_check")
+        cur.execute(
+            """
+            alter table api_usage_logs
+            add constraint api_usage_logs_status_check
+            check (status in ('success', 'error', 'cancelled', 'blocked'))
             """
         )
         cur.execute(

@@ -341,7 +341,7 @@ create table if not exists api_usage_logs (
   feature varchar(60) not null,
   related_type varchar(40) null,
   related_id uuid null,
-  status varchar(20) not null check (status in ('success', 'error', 'cancelled')),
+  status varchar(20) not null check (status in ('success', 'error', 'cancelled', 'blocked')),
   prompt_tokens int not null default 0,
   completion_tokens int not null default 0,
   total_tokens int not null default 0,
@@ -350,6 +350,19 @@ create table if not exists api_usage_logs (
   cost_usd numeric(12,6) null,
   duration_ms int null,
   error_code varchar(80) null,
+  meta_json jsonb null
+);
+
+alter table api_usage_logs drop constraint if exists api_usage_logs_status_check;
+alter table api_usage_logs
+  add constraint api_usage_logs_status_check
+  check (status in ('success', 'error', 'cancelled', 'blocked'));
+
+create table if not exists cv_jd_analysis_cache (
+  input_hash char(64) primary key,
+  response_text text not null,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
   meta_json jsonb null
 );
 
@@ -416,6 +429,9 @@ create index if not exists idx_api_usage_logs_user_time
 
 create index if not exists idx_api_usage_logs_feature_time
   on api_usage_logs (feature, occurred_at desc);
+
+create index if not exists idx_cv_jd_analysis_cache_expires
+  on cv_jd_analysis_cache (expires_at);
 
 create index if not exists idx_user_activity_events_user_time
   on user_activity_events (user_id, occurred_at desc);

@@ -328,6 +328,12 @@ TABLES: tuple[TableMeta, ...] = (
         ("meta_json",),
     ),
     TableMeta(
+        "cv_jd_analysis_cache",
+        "input_hash",
+        ("input_hash", "response_text", "created_at", "expires_at", "meta_json"),
+        ("meta_json",),
+    ),
+    TableMeta(
         "user_activity_events",
         "id",
         (
