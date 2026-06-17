@@ -24,7 +24,7 @@ from config import (
     PAYOS_RETURN_URL,
 )
 from core.database import get_connection
-from services.plan_quota_service import ensure_plan_quota_schema
+from services.plan_quota_service import ensure_plan_quota_schema, get_plan_quota_summary_sync
 
 logger = logging.getLogger("viecareer")
 
@@ -94,6 +94,7 @@ async def create_payos_checkout(
 def get_billing_overview(*, external_auth_id: str, email: str | None) -> dict[str, Any]:
     ensure_billing_schema()
     expire_due_subscriptions_sync()
+    quota_summary = get_plan_quota_summary_sync(external_auth_id=external_auth_id)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -106,6 +107,7 @@ def get_billing_overview(*, external_auth_id: str, email: str | None) -> dict[st
                     "subscription": None,
                     "plans": plans,
                     "recent_payments": [],
+                    "quota_summary": quota_summary,
                 }
 
             subscription = _current_subscription(cur, user["id"])
@@ -117,6 +119,7 @@ def get_billing_overview(*, external_auth_id: str, email: str | None) -> dict[st
         "subscription": subscription,
         "plans": plans,
         "recent_payments": payments,
+        "quota_summary": quota_summary,
     }
 
 

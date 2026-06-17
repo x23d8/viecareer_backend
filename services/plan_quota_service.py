@@ -137,6 +137,13 @@ _USAGE_BASED_FEATURES = {
     FEATURE_AI_CODE_FEEDBACK,
 }
 
+_QUOTA_SUMMARY_FEATURES: tuple[tuple[str, str], ...] = (
+    (FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT),
+    (FEATURE_CV_JD_ANALYSIS, METRIC_COUNT),
+    (FEATURE_CHATBOT, METRIC_MESSAGE_COUNT),
+    (FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT),
+)
+
 _PLAN_PRIORITY = {
     "team": 400,
     "pro": 300,
@@ -162,6 +169,38 @@ async def check_plan_quota(
         metric=metric,
         requested_units=requested_units,
     )
+
+
+async def get_plan_quota_summary(*, external_auth_id: str) -> list[dict[str, Any]]:
+    """Return usage/remaining counters for user-visible plan quotas."""
+
+    return await asyncio.to_thread(
+        get_plan_quota_summary_sync,
+        external_auth_id=external_auth_id,
+    )
+
+
+def get_plan_quota_summary_sync(*, external_auth_id: str) -> list[dict[str, Any]]:
+    """Synchronous quota summary helper for non-async routers/services."""
+
+    if not external_auth_id:
+        return []
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _ensure_quota_schema(cur)
+            summary = [
+                _quota_decision_sync(
+                    cur,
+                    external_auth_id=external_auth_id,
+                    feature_code=feature_code,
+                    metric=metric,
+                ).payload()
+                for feature_code, metric in _QUOTA_SUMMARY_FEATURES
+            ]
+        conn.commit()
+
+    return summary
 
 
 async def get_realtime_session_limit_seconds(*, external_auth_id: str) -> int | None:
@@ -196,51 +235,65 @@ def _check_plan_quota_sync(
     with get_connection() as conn:
         with conn.cursor() as cur:
             _ensure_quota_schema(cur)
-            plan = _effective_plan(cur, external_auth_id, feature_code)
-            limit = _find_limit(cur, plan.code, feature_code, metric)
-            if not limit:
-                conn.commit()
-                return _unlimited_decision(plan.code, plan.name, feature_code, metric)
-
-            if limit.limit_value is None:
-                conn.commit()
-                return QuotaDecision(
-                    allowed=True,
-                    plan_code=plan.code,
-                    plan_name=plan.name,
-                    feature_code=feature_code,
-                    metric=metric,
-                    period=limit.period,
-                    limit_value=None,
-                    used=0,
-                    remaining=None,
-                    reset_at=None,
-                )
-
-            window_start, reset_at = _window_for_period(limit.period, plan)
-            used = _usage_count(cur, external_auth_id, feature_code, metric, window_start)
-            remaining = max(0, int(limit.limit_value) - used)
-            allowed = used + max(1, requested_units) <= int(limit.limit_value)
-            decision = QuotaDecision(
-                allowed=allowed,
-                plan_code=plan.code,
-                plan_name=plan.name,
+            decision = _quota_decision_sync(
+                cur,
+                external_auth_id=external_auth_id,
                 feature_code=feature_code,
                 metric=metric,
-                period=limit.period,
-                limit_value=int(limit.limit_value),
-                used=used,
-                remaining=remaining,
-                reset_at=reset_at,
+                requested_units=requested_units,
             )
 
-            if not decision.allowed and plan.code == PLAN_USAGE_BASED:
+            if not decision.allowed and decision.plan_code == PLAN_USAGE_BASED:
                 decision = _free_plan_decision(cur, external_auth_id, feature_code, metric, requested_units)
             conn.commit()
 
     if not decision.allowed:
         _raise_quota_exceeded(decision)
     return decision
+
+
+def _quota_decision_sync(
+    cur,
+    *,
+    external_auth_id: str,
+    feature_code: str,
+    metric: str,
+    requested_units: int = 1,
+) -> QuotaDecision:
+    plan = _effective_plan(cur, external_auth_id, feature_code)
+    limit = _find_limit(cur, plan.code, feature_code, metric)
+    if not limit:
+        return _unlimited_decision(plan.code, plan.name, feature_code, metric)
+
+    if limit.limit_value is None:
+        return QuotaDecision(
+            allowed=True,
+            plan_code=plan.code,
+            plan_name=plan.name,
+            feature_code=feature_code,
+            metric=metric,
+            period=limit.period,
+            limit_value=None,
+            used=0,
+            remaining=None,
+            reset_at=None,
+        )
+
+    window_start, reset_at = _window_for_period(limit.period, plan)
+    used = _usage_count(cur, external_auth_id, feature_code, metric, window_start)
+    remaining = max(0, int(limit.limit_value) - used)
+    return QuotaDecision(
+        allowed=used + max(1, requested_units) <= int(limit.limit_value),
+        plan_code=plan.code,
+        plan_name=plan.name,
+        feature_code=feature_code,
+        metric=metric,
+        period=limit.period,
+        limit_value=int(limit.limit_value),
+        used=used,
+        remaining=remaining,
+        reset_at=reset_at,
+    )
 
 
 def _free_plan_decision(
