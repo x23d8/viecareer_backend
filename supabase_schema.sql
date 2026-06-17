@@ -487,12 +487,27 @@ create index if not exists idx_api_usage_logs_feature_time
 
 create index if not exists idx_cv_jd_analysis_cache_expires
   on cv_jd_analysis_cache (expires_at);
+create index if not exists idx_api_usage_logs_user_model_time
+  on api_usage_logs (user_id, model, occurred_at desc);
+
+create index if not exists idx_api_usage_logs_user_feature_time
+  on api_usage_logs (user_id, feature, occurred_at desc);
+
+create index if not exists idx_api_usage_logs_external_time
+  on api_usage_logs (external_auth_id, occurred_at desc);
 
 create index if not exists idx_user_activity_events_user_time
   on user_activity_events (user_id, occurred_at desc);
 
 create index if not exists idx_user_activity_events_name_time
   on user_activity_events (event_name, occurred_at desc);
+
+create index if not exists idx_user_activity_events_user_name_time
+  on user_activity_events (user_id, event_name, occurred_at desc);
+
+create index if not exists idx_user_activity_events_external_time
+  on user_activity_events (external_auth_id, occurred_at desc);
+
 create index if not exists idx_landing_events_created
   on landing_events (created_at desc);
 
@@ -504,6 +519,9 @@ create index if not exists idx_landing_events_event_created
 
 create index if not exists idx_landing_events_visitor_created
   on landing_events (visitor_id, created_at desc);
+
+create index if not exists idx_landing_events_user_created
+  on landing_events (user_id, created_at desc);
 
 -- Optional seed data
 insert into roles (code, name)

@@ -55,6 +55,9 @@ def ensure_landing_events_schema() -> None:
             cur.execute(
                 "create index if not exists idx_landing_events_visitor_created on landing_events (visitor_id, created_at desc)"
             )
+            cur.execute(
+                "create index if not exists idx_landing_events_user_created on landing_events (user_id, created_at desc)"
+            )
         conn.commit()
     _schema_ready = True
 

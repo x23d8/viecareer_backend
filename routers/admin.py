@@ -15,7 +15,12 @@ from core.clerk_auth import AdminUser, require_admin
 from core.database import get_connection
 from core.rate_limit import limiter
 from schemas.events import LandingMetricGroupBy, LandingSource
+from services.admin_user_service import UserMetricGroupBy, get_admin_user_metrics, list_admin_users
+from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics
 from services.landing_event_service import ensure_landing_events_schema, get_landing_metrics
+
+router = APIRouter(prefix="/api/admin", tags=["admin"])
+logger = logging.getLogger("viecareer")
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger("viecareer")
@@ -608,6 +613,71 @@ def get_usage_summary(
         ) from exc
 
     return {"data": {"days": days, "totals": totals, "items": rows}}
+
+
+@router.get("/feature-metrics")
+@limiter.limit("30/minute")
+def get_admin_feature_metrics(
+    request: Request,
+    days: int = Query(30, ge=1, le=180),
+    group_by: FeatureGroupBy = Query(default="day"),
+    current_admin: AdminUser = Depends(require_admin),
+):
+    try:
+        return {"data": get_feature_metrics(days=days, group_by=group_by)}
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not load feature metrics.",
+        ) from exc
+
+
+@router.get("/users")
+@limiter.limit("30/minute")
+def get_admin_users(
+    request: Request,
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str | None = Query(default=None, max_length=120),
+    status_filter: str | None = Query(default=None, alias="status"),
+    plan_filter: str | None = Query(default=None, alias="plan"),
+    current_admin: AdminUser = Depends(require_admin),
+):
+    try:
+        return {
+            "data": list_admin_users(
+                limit=limit,
+                offset=offset,
+                search=search.strip() if search else None,
+                status_filter=status_filter,
+                plan_filter=plan_filter,
+            )
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not load users.",
+        ) from exc
+
+
+@router.get("/users/{user_id}/metrics")
+@limiter.limit("30/minute")
+def get_admin_user_metric_detail(
+    request: Request,
+    user_id: str,
+    days: int = Query(30, ge=1, le=180),
+    group_by: UserMetricGroupBy = Query(default="day"),
+    current_admin: AdminUser = Depends(require_admin),
+):
+    try:
+        return {"data": get_admin_user_metrics(user_id=user_id, days=days, group_by=group_by)}
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not load user metrics.",
+        ) from exc
 
 
 @router.get("/activity/recent")
