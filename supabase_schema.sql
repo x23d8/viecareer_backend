@@ -17,8 +17,13 @@ create table if not exists plans (
   monthly_price numeric(12,2) not null,
   quota_total int not null,
   rate_limit_per_minute int not null,
+  billing_period varchar(20) not null default 'month' check (billing_period in ('month', 'usage')),
+  included_members int not null default 1,
   created_at timestamptz not null default now()
 );
+
+alter table plans add column if not exists billing_period varchar(20) not null default 'month';
+alter table plans add column if not exists included_members int not null default 1;
 
 create table if not exists users (
   id uuid primary key default gen_random_uuid(),
@@ -70,6 +75,64 @@ create table if not exists user_subscriptions (
   auto_renew boolean not null default false,
   created_at timestamptz not null default now()
 );
+
+alter table user_subscriptions add column if not exists payment_id bigint null;
+alter table user_subscriptions add column if not exists provider varchar(40) null;
+alter table user_subscriptions add column if not exists provider_subscription_id varchar(255) null;
+alter table user_subscriptions add column if not exists current_period_start timestamptz null;
+alter table user_subscriptions add column if not exists current_period_end timestamptz null;
+alter table user_subscriptions add column if not exists cancelled_at timestamptz null;
+alter table user_subscriptions add column if not exists updated_at timestamptz not null default now();
+
+create table if not exists plan_feature_limits (
+  id bigserial primary key,
+  plan_id bigint not null references plans(id) on delete cascade,
+  feature_code varchar(60) not null,
+  metric varchar(40) not null,
+  period varchar(20) not null check (period in ('day', 'month', 'session', 'purchase')),
+  limit_value int null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (plan_id, feature_code, metric, period)
+);
+
+create table if not exists payment_transactions (
+  id bigserial primary key,
+  user_id uuid not null references users(id) on delete cascade,
+  plan_id bigint not null references plans(id),
+  subscription_id bigint null references user_subscriptions(id) on delete set null,
+  provider varchar(40) not null default 'payos',
+  order_code bigint unique,
+  payment_link_id varchar(255) null,
+  checkout_url text null,
+  amount_vnd int not null,
+  currency varchar(10) not null default 'VND',
+  status varchar(20) not null check (status in ('pending', 'paid', 'cancelled', 'expired', 'failed')),
+  description varchar(255) null,
+  period_start timestamptz null,
+  period_end timestamptz null,
+  paid_at timestamptz null,
+  cancelled_at timestamptz null,
+  expired_at timestamptz null,
+  raw_request_json jsonb null,
+  raw_response_json jsonb null,
+  webhook_json jsonb null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.table_constraints
+    where constraint_name = 'fk_user_subscriptions_payment_id'
+      and table_name = 'user_subscriptions'
+  ) then
+    alter table user_subscriptions
+    add constraint fk_user_subscriptions_payment_id
+    foreign key (payment_id) references payment_transactions(id) on delete set null;
+  end if;
+end $$;
 
 create table if not exists auth_sessions (
   id uuid primary key default gen_random_uuid(),
@@ -324,7 +387,7 @@ create table if not exists api_usage_logs (
   feature varchar(60) not null,
   related_type varchar(40) null,
   related_id uuid null,
-  status varchar(20) not null check (status in ('success', 'error', 'cancelled')),
+  status varchar(20) not null check (status in ('success', 'error', 'cancelled', 'blocked')),
   prompt_tokens int not null default 0,
   completion_tokens int not null default 0,
   total_tokens int not null default 0,
@@ -333,6 +396,19 @@ create table if not exists api_usage_logs (
   cost_usd numeric(12,6) null,
   duration_ms int null,
   error_code varchar(80) null,
+  meta_json jsonb null
+);
+
+alter table api_usage_logs drop constraint if exists api_usage_logs_status_check;
+alter table api_usage_logs
+  add constraint api_usage_logs_status_check
+  check (status in ('success', 'error', 'cancelled', 'blocked'));
+
+create table if not exists cv_jd_analysis_cache (
+  input_hash char(64) primary key,
+  response_text text not null,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
   meta_json jsonb null
 );
 
@@ -391,12 +467,26 @@ create index if not exists idx_cv_jd_analyses_user_created
 create index if not exists idx_uploaded_files_user_created
   on uploaded_files (user_id, created_at desc);
 
+create index if not exists idx_plan_feature_limits_plan_feature
+  on plan_feature_limits (plan_id, feature_code, metric);
+
+create index if not exists idx_payment_transactions_user_created
+  on payment_transactions (user_id, created_at desc);
+
+create index if not exists idx_payment_transactions_status_created
+  on payment_transactions (status, created_at desc);
+
+create index if not exists idx_payment_transactions_payment_link
+  on payment_transactions (payment_link_id);
+
 create index if not exists idx_api_usage_logs_user_time
   on api_usage_logs (user_id, occurred_at desc);
 
 create index if not exists idx_api_usage_logs_feature_time
   on api_usage_logs (feature, occurred_at desc);
 
+create index if not exists idx_cv_jd_analysis_cache_expires
+  on cv_jd_analysis_cache (expires_at);
 create index if not exists idx_api_usage_logs_user_model_time
   on api_usage_logs (user_id, model, occurred_at desc);
 
@@ -440,7 +530,58 @@ on conflict (code) do nothing;
 
 insert into plans (code, name, monthly_price, quota_total, rate_limit_per_minute)
 values
-  ('free', 'Free', 0, 10, 20),
-  ('pro', 'Pro', 299000, 50, 50),
-  ('team', 'Team', 799000, 200, 100)
-on conflict (code) do nothing;
+  ('free', 'Free / Freemium', 0, 3, 20),
+  ('standard', 'Standard', 99000, 15, 50),
+  ('pro', 'Pro / Premium', 299000, 30, 50),
+  ('team', 'Team', 1199000, 30, 100),
+  ('usage_based', 'Usage-Based', 29000, 1, 20)
+on conflict (code) do update
+set
+  name = excluded.name,
+  monthly_price = excluded.monthly_price,
+  quota_total = excluded.quota_total,
+  rate_limit_per_minute = excluded.rate_limit_per_minute;
+
+update plans
+set billing_period = case when code = 'usage_based' then 'usage' else 'month' end,
+    included_members = case when code = 'team' then 5 else 1 end
+where code in ('free', 'standard', 'pro', 'team', 'usage_based');
+
+delete from plan_feature_limits l
+using plans p
+where p.id = l.plan_id
+  and p.code in ('free', 'standard', 'pro', 'team', 'usage_based');
+
+insert into plan_feature_limits (plan_id, feature_code, metric, period, limit_value)
+select p.id, limits.feature_code, limits.metric, limits.period, limits.limit_value
+from plans p
+join (
+  values
+    ('free', 'cv_jd_analysis', 'count', 'month', 3),
+    ('free', 'realtime_interview', 'session_count', 'month', 2),
+    ('free', 'realtime_interview', 'session_minutes', 'session', 10),
+    ('free', 'chatbot', 'message_count', 'day', 10),
+    ('free', 'coding_plan', 'generation_count', 'day', 2),
+    ('standard', 'cv_jd_analysis', 'count', 'month', 15),
+    ('standard', 'realtime_interview', 'session_count', 'month', 10),
+    ('standard', 'realtime_interview', 'session_minutes', 'session', 25),
+    ('standard', 'chatbot', 'message_count', 'day', 50),
+    ('standard', 'coding_plan', 'generation_count', 'day', 10),
+    ('pro', 'cv_jd_analysis', 'count', 'month', 30),
+    ('pro', 'realtime_interview', 'session_count', 'month', 20),
+    ('pro', 'realtime_interview', 'session_minutes', 'session', 45),
+    ('pro', 'chatbot', 'message_count', 'day', 150),
+    ('pro', 'coding_plan', 'generation_count', 'day', 15),
+    ('team', 'cv_jd_analysis', 'count', 'month', 30),
+    ('team', 'realtime_interview', 'session_count', 'month', 20),
+    ('team', 'realtime_interview', 'session_minutes', 'session', 45),
+    ('team', 'chatbot', 'message_count', 'day', 150),
+    ('team', 'coding_plan', 'generation_count', 'day', 15),
+    ('usage_based', 'cv_jd_analysis', 'count', 'purchase', 1),
+    ('usage_based', 'realtime_interview', 'session_count', 'purchase', 1),
+    ('usage_based', 'realtime_interview', 'session_minutes', 'session', 15),
+    ('usage_based', 'ai_code_feedback', 'attempt_count', 'purchase', 1)
+) as limits(plan_code, feature_code, metric, period, limit_value) on p.code = limits.plan_code
+on conflict (plan_id, feature_code, metric, period) do update
+set limit_value = excluded.limit_value,
+    updated_at = now();

@@ -25,6 +25,12 @@ from core.prompts import load_prompt
 from schemas.interview_simulation import SelectNextQuestionRequest
 from schemas.realtime import RealtimeSessionMetadata
 from services.interview_simulation_service import InterviewSimulationService
+from services.plan_quota_service import (
+    FEATURE_REALTIME_INTERVIEW,
+    METRIC_SESSION_COUNT,
+    check_plan_quota,
+    get_realtime_session_limit_seconds,
+)
 from services.realtime_transcript_service import (
     complete_live_interview_session,
     create_live_interview_session,
@@ -92,6 +98,7 @@ def create_realtime_session() -> dict:
 @dataclass
 class _RelayState:
     started_at: float = field(default_factory=time.monotonic)
+    session_started_at: float | None = None
     auth_external_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str | None = None
@@ -109,9 +116,11 @@ class _RelayState:
     completed: bool = False
     realtime_usage_logged: bool = False
     realtime_estimate_logged: bool = False
+    max_duration_seconds: int | None = None
 
     def timestamp_sec(self) -> int:
-        return max(0, int(time.monotonic() - self.started_at))
+        base = self.session_started_at or self.started_at
+        return max(0, int(time.monotonic() - base))
 
 
 async def relay_realtime_websocket(websocket: WebSocket, auth_external_id: str | None = None) -> None:
@@ -137,8 +146,9 @@ async def relay_realtime_websocket(websocket: WebSocket, auth_external_id: str |
 
             client_task = asyncio.create_task(_client_to_openai(websocket, openai_ws, state))
             openai_task = asyncio.create_task(_openai_to_client(websocket, openai_ws, state))
+            quota_task = asyncio.create_task(_enforce_realtime_time_limit(websocket, openai_ws, state))
             done, pending = await asyncio.wait(
-                {client_task, openai_task},
+                {client_task, openai_task, quota_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
@@ -156,7 +166,7 @@ async def relay_realtime_websocket(websocket: WebSocket, auth_external_id: str |
         await _send_client_error(websocket, f"Realtime relay failed: {exc}")
     finally:
         if state.initialized and not state.completed:
-            duration_seconds = state.timestamp_sec()
+            duration_seconds = _bounded_duration_seconds(state.timestamp_sec(), state.max_duration_seconds)
             await asyncio.to_thread(_complete_live_session_safe, state.session_id, duration_seconds)
             _track_realtime_session_estimate(state, duration_seconds)
 
@@ -196,6 +206,26 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
 
             state.metadata = validated.model_dump(mode="json")
             state.blueprint = _coerce_blueprint(state.metadata.get("blueprint"))
+
+            try:
+                await check_plan_quota(
+                    external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id or "",
+                    feature_code=FEATURE_REALTIME_INTERVIEW,
+                    metric=METRIC_SESSION_COUNT,
+                )
+                state.max_duration_seconds = await get_realtime_session_limit_seconds(
+                    external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id or "",
+                )
+            except HTTPException as exc:
+                await _send_client_error(
+                    websocket,
+                    _http_exception_message(exc),
+                    code="PLAN_QUOTA_EXCEEDED",
+                    detail=exc.detail if isinstance(exc.detail, dict) else None,
+                )
+                await openai_ws.close(code=1008, reason="Plan quota exceeded")
+                return
+
             state.session_id = await asyncio.to_thread(_create_live_session_safe, state.metadata)
             if not state.session_id:
                 await _send_client_error(websocket, "Could not persist realtime interview context")
@@ -203,12 +233,17 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                 return
 
             state.initialized = True
+            state.session_started_at = time.monotonic()
             await openai_ws.send(json.dumps(_session_update_event(state.metadata, state.blueprint)))
             await websocket.send_json(
                 {
                     "type": "viecareer.session.started",
                     "session_id": state.session_id,
                     "context_version": 1,
+                    "quota": {
+                        "max_duration_seconds": state.max_duration_seconds,
+                        "max_duration_minutes": _minutes_from_seconds(state.max_duration_seconds),
+                    },
                 }
             )
             track_user_activity_async(
@@ -226,7 +261,10 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
             continue
 
         if event_type == "client.stop":
-            duration_seconds = _int_or_none(event.get("duration_seconds"))
+            duration_seconds = _bounded_duration_seconds(
+                _int_or_none(event.get("duration_seconds")),
+                state.max_duration_seconds,
+            )
             await asyncio.to_thread(_complete_live_session_safe, state.session_id, duration_seconds)
             state.completed = True
             track_user_activity_async(
@@ -252,6 +290,48 @@ async def _openai_to_client(websocket: WebSocket, openai_ws, state: _RelayState)
         message = raw_message.decode("utf-8") if isinstance(raw_message, bytes) else raw_message
         await websocket.send_text(message)
         await _persist_realtime_event(message, state, openai_ws)
+
+
+async def _enforce_realtime_time_limit(websocket: WebSocket, openai_ws, state: _RelayState) -> None:
+    while True:
+        await asyncio.sleep(1)
+        if not state.initialized or state.completed or not state.max_duration_seconds:
+            continue
+
+        if state.timestamp_sec() < state.max_duration_seconds:
+            continue
+
+        duration_seconds = state.max_duration_seconds
+        await asyncio.to_thread(_complete_live_session_safe, state.session_id, duration_seconds)
+        state.completed = True
+        track_user_activity_async(
+            "interview_completed",
+            external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+            object_type="interview_session",
+            object_id=state.session_id,
+            meta={
+                "duration_seconds": duration_seconds,
+                "questions_asked": state.question_order,
+                "transcript_turns": len(state.transcript),
+                "quota_time_limit": True,
+            },
+        )
+        _track_realtime_session_estimate(state, duration_seconds)
+        await _send_client_error(
+            websocket,
+            "Realtime interview time limit reached for your current plan.",
+            code="PLAN_QUOTA_TIME_LIMIT",
+            detail={
+                "max_duration_seconds": state.max_duration_seconds,
+                "max_duration_minutes": _minutes_from_seconds(state.max_duration_seconds),
+            },
+        )
+        await openai_ws.close(code=1000, reason="Plan time limit reached")
+        try:
+            await websocket.close(code=1000)
+        except RuntimeError:
+            pass
+        return
 
 
 async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_ws) -> None:
@@ -845,11 +925,43 @@ def _save_qa_pair_safe(
         logger.exception("Could not save realtime Q&A pair")
 
 
-async def _send_client_error(websocket: WebSocket, message: str) -> None:
+async def _send_client_error(
+    websocket: WebSocket,
+    message: str,
+    *,
+    code: str = "REALTIME_ERROR",
+    detail: dict[str, Any] | None = None,
+) -> None:
     try:
-        await websocket.send_json({"type": "viecareer.error", "message": message})
+        payload: dict[str, Any] = {"type": "viecareer.error", "code": code, "message": message}
+        if detail:
+            payload["detail"] = detail
+        await websocket.send_json(payload)
     except Exception:
         logger.debug("Could not send realtime client error", exc_info=True)
+
+
+def _http_exception_message(exc: HTTPException) -> str:
+    if isinstance(exc.detail, dict):
+        message = exc.detail.get("message")
+        if message:
+            return str(message)
+    return str(exc.detail)
+
+
+def _minutes_from_seconds(seconds: int | None) -> int | None:
+    if seconds is None:
+        return None
+    return max(0, int(seconds) // 60)
+
+
+def _bounded_duration_seconds(duration_seconds: int | None, max_duration_seconds: int | None) -> int | None:
+    if duration_seconds is None:
+        return None
+    duration = max(0, int(duration_seconds))
+    if max_duration_seconds is None:
+        return duration
+    return min(duration, max(0, int(max_duration_seconds)))
 
 
 def _json_object(raw_message: str) -> dict[str, Any]:

@@ -2,9 +2,9 @@
 
 import time
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from core.api_usage import track_user_activity_async, usage_context
+from core.api_usage import track_blocked_ai_usage_async, track_user_activity_async, usage_context
 from core.clerk_auth import ClerkUser, require_auth
 from core.openai_client import get_openai_client
 from core.rate_limit import (
@@ -21,8 +21,15 @@ from schemas.analysis import (
     ScoreInterviewRequest,
 )
 from services.analysis_service import extract_cvjd, score_interview
+from services.cvjd_spam_guard import (
+    CVJDSpamRejected,
+    get_cached_cvjd_analysis,
+    store_cvjd_analysis_cache,
+    validate_cvjd_request,
+)
 from services.cv_jd_analysis_service import save_cv_jd_analysis
 from services.interview_report_service import save_interview_report
+from services.plan_quota_service import FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, check_plan_quota
 
 router = APIRouter(tags=["analysis"])
 
@@ -36,23 +43,85 @@ async def extract_cvjd_route(
     client=Depends(get_openai_client),
 ):
     """Analyze CV and JD to extract structured profile, ATS score, and gap analysis."""
-    await check_daily_quota()
+    started_at = time.perf_counter()
+    usage = usage_context(
+        feature="cvjd_extract",
+        external_auth_id=current_user.user_id,
+        meta={"endpoint": "/extract-cvjd"},
+    )
+    try:
+        fingerprint = validate_cvjd_request(req.cv_text, req.jd_text)
+    except CVJDSpamRejected as exc:
+        track_blocked_ai_usage_async(
+            usage,
+            error_code=exc.code,
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            meta={
+                "endpoint": "/extract-cvjd",
+                "reason": exc.code,
+                **exc.meta,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": True,
+                "code": exc.code,
+                "message": exc.message,
+                "retry": False,
+                "meta": exc.meta,
+            },
+        ) from exc
+
+    cached_reply = get_cached_cvjd_analysis(fingerprint.input_hash)
+    if cached_reply is not None:
+        track_user_activity_async(
+            "cvjd_cache_hit",
+            external_auth_id=current_user.user_id,
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            meta={
+                "endpoint": "/extract-cvjd",
+                "input_hash_prefix": fingerprint.input_hash[:12],
+                "cv_chars": fingerprint.cv_chars,
+                "jd_chars": fingerprint.jd_chars,
+            },
+        )
+        return {"reply": cached_reply, "cached": True}
+
     await check_user_limit_ai(current_user.user_id)
+    await check_plan_quota(
+        external_auth_id=current_user.user_id,
+        feature_code=FEATURE_CV_JD_ANALYSIS,
+        metric=METRIC_COUNT,
+    )
+    await check_daily_quota()
     async with ai_concurrency_limit():
+        reply = extract_cvjd(
+            client,
+            req,
+            usage_context=usage_context(
+                feature="cvjd_extract",
+                external_auth_id=current_user.user_id,
+                meta={
+                    "endpoint": "/extract-cvjd",
+                    "cv_chars": fingerprint.cv_chars,
+                    "jd_chars": fingerprint.jd_chars,
+                    "input_hash_prefix": fingerprint.input_hash[:12],
+                },
+            ),
+        )
+        store_cvjd_analysis_cache(
+            fingerprint.input_hash,
+            reply,
+            meta={
+                "external_auth_id": current_user.user_id,
+                "cv_chars": fingerprint.cv_chars,
+                "jd_chars": fingerprint.jd_chars,
+            },
+        )
         return {
-            "reply": extract_cvjd(
-                client,
-                req,
-                usage_context=usage_context(
-                    feature="cvjd_extract",
-                    external_auth_id=current_user.user_id,
-                    meta={
-                        "endpoint": "/extract-cvjd",
-                        "cv_chars": len(req.cv_text or ""),
-                        "jd_chars": len(req.jd_text or ""),
-                    },
-                ),
-            )
+            "reply": reply,
+            "cached": False,
         }
 
 
