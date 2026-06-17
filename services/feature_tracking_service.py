@@ -82,11 +82,13 @@ def get_feature_metrics(
     *,
     days: int,
     group_by: FeatureGroupBy,
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> dict[str, Any]:
     ensure_tracking_tables()
     ensure_landing_events_schema()
 
-    start_at, end_at = _date_window(days)
+    start_at, end_at = _date_window(days, date_from, date_to)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -420,8 +422,15 @@ def _summary(features: list[dict[str, Any]], dropoff: dict[str, Any]) -> dict[st
         "most_used_feature": top_feature,
     }
 
-def _date_window(days: int) -> tuple[datetime, datetime]:
+def _date_window(days: int, date_from: date | None = None, date_to: date | None = None) -> tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
+    if date_from or date_to:
+        start_date = date_from or (now.date() - timedelta(days=days - 1))
+        end_date = date_to or now.date()
+        start_at = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
+        end_at = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        return start_at, end_at
+
     end_at = datetime.combine(now.date() + timedelta(days=1), time.min, tzinfo=timezone.utc)
     start_at = end_at - timedelta(days=days)
     return start_at, end_at

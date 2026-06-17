@@ -60,6 +60,28 @@ class AdminAuthorizationTests(unittest.TestCase):
     def test_admin_endpoint_allows_admin_user(self):
         self.authenticate_as("user")
         self.set_db_user(1)
+        active_patch = patch("routers.admin.ensure_tracking_tables")
+        active_patch.start()
+        self._patches.append(active_patch)
+        active_patch = patch("routers.admin.get_landing_metrics", return_value={
+            "summary": {
+                "landing_views": 0,
+                "pricing_clicks": 0,
+                "signup_clicks": 0,
+                "login_clicks": 0,
+                "unique_visitors": 0,
+            },
+            "by_source": [],
+            "trend": [],
+        })
+        active_patch.start()
+        self._patches.append(active_patch)
+        active_patch = patch("routers.admin.get_feature_metrics", return_value={"features": []})
+        active_patch.start()
+        self._patches.append(active_patch)
+        active_patch = patch("routers.admin.get_connection", return_value=FakeOverviewConnection())
+        active_patch.start()
+        self._patches.append(active_patch)
 
         response = self.client.get("/api/admin/overview")
 
@@ -69,7 +91,9 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(payload["current_admin"]["email"], "admin@example.com")
         self.assertEqual(payload["current_admin"]["full_name"], "Admin One")
         self.assertEqual(payload["current_admin"]["role_id"], 1)
-        self.assertEqual(payload["dashboard"], {})
+        self.assertEqual(payload["kpis"]["total_users"], 1)
+        self.assertEqual(payload["kpis"]["free_users"], 1)
+        self.assertEqual(payload["function_metrics"], [])
 
     def test_admin_me_returns_current_admin_from_database(self):
         self.authenticate_as("user")
@@ -138,6 +162,47 @@ class FakeCursor:
             "full_name": "Admin One",
             "role_id": self.role_id,
         }
+
+
+class FakeOverviewConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def cursor(self):
+        return FakeOverviewCursor()
+
+
+class FakeOverviewCursor:
+    def __init__(self):
+        self.fetchone_calls = 0
+        self.fetchall_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, query, params=None):
+        return None
+
+    def fetchone(self):
+        rows = [
+            {"total_users": 1, "free_users": 1, "revenue": 0},
+            {"cv_jd_analyses": 0},
+            {"completed_interviews": 0},
+            {"total_ai_cost_usd": 0, "ai_calls": 0},
+        ]
+        row = rows[self.fetchone_calls]
+        self.fetchone_calls += 1
+        return row
+
+    def fetchall(self):
+        self.fetchall_calls += 1
+        return []
 
 
 if __name__ == "__main__":
