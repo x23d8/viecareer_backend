@@ -76,6 +76,14 @@ create table if not exists user_subscriptions (
   created_at timestamptz not null default now()
 );
 
+alter table user_subscriptions add column if not exists payment_id bigint null;
+alter table user_subscriptions add column if not exists provider varchar(40) null;
+alter table user_subscriptions add column if not exists provider_subscription_id varchar(255) null;
+alter table user_subscriptions add column if not exists current_period_start timestamptz null;
+alter table user_subscriptions add column if not exists current_period_end timestamptz null;
+alter table user_subscriptions add column if not exists cancelled_at timestamptz null;
+alter table user_subscriptions add column if not exists updated_at timestamptz not null default now();
+
 create table if not exists plan_feature_limits (
   id bigserial primary key,
   plan_id bigint not null references plans(id) on delete cascade,
@@ -87,6 +95,44 @@ create table if not exists plan_feature_limits (
   updated_at timestamptz not null default now(),
   unique (plan_id, feature_code, metric, period)
 );
+
+create table if not exists payment_transactions (
+  id bigserial primary key,
+  user_id uuid not null references users(id) on delete cascade,
+  plan_id bigint not null references plans(id),
+  subscription_id bigint null references user_subscriptions(id) on delete set null,
+  provider varchar(40) not null default 'payos',
+  order_code bigint unique,
+  payment_link_id varchar(255) null,
+  checkout_url text null,
+  amount_vnd int not null,
+  currency varchar(10) not null default 'VND',
+  status varchar(20) not null check (status in ('pending', 'paid', 'cancelled', 'expired', 'failed')),
+  description varchar(255) null,
+  period_start timestamptz null,
+  period_end timestamptz null,
+  paid_at timestamptz null,
+  cancelled_at timestamptz null,
+  expired_at timestamptz null,
+  raw_request_json jsonb null,
+  raw_response_json jsonb null,
+  webhook_json jsonb null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.table_constraints
+    where constraint_name = 'fk_user_subscriptions_payment_id'
+      and table_name = 'user_subscriptions'
+  ) then
+    alter table user_subscriptions
+    add constraint fk_user_subscriptions_payment_id
+    foreign key (payment_id) references payment_transactions(id) on delete set null;
+  end if;
+end $$;
 
 create table if not exists auth_sessions (
   id uuid primary key default gen_random_uuid(),
@@ -423,6 +469,15 @@ create index if not exists idx_uploaded_files_user_created
 
 create index if not exists idx_plan_feature_limits_plan_feature
   on plan_feature_limits (plan_id, feature_code, metric);
+
+create index if not exists idx_payment_transactions_user_created
+  on payment_transactions (user_id, created_at desc);
+
+create index if not exists idx_payment_transactions_status_created
+  on payment_transactions (status, created_at desc);
+
+create index if not exists idx_payment_transactions_payment_link
+  on payment_transactions (payment_link_id);
 
 create index if not exists idx_api_usage_logs_user_time
   on api_usage_logs (user_id, occurred_at desc);

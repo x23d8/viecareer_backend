@@ -81,12 +81,20 @@ class QuotaDecision:
         }
 
 
+# _DEFAULT_PLANS: tuple[tuple[str, str, str, int, int, str, int], ...] = (
+#     ("free", "Free / Freemium", "0.00", 3, 20, "month", 1),
+#     ("standard", "Standard", "99000.00", 15, 50, "month", 1),
+#     ("pro", "Pro / Premium", "299000.00", 30, 50, "month", 1),
+#     ("team", "Team", "1199000.00", 30, 100, "month", 5),
+#     ("usage_based", "Usage-Based", "29000.00", 1, 20, "usage", 1),
+# )
+
 _DEFAULT_PLANS: tuple[tuple[str, str, str, int, int, str, int], ...] = (
     ("free", "Free / Freemium", "0.00", 3, 20, "month", 1),
-    ("standard", "Standard", "99000.00", 15, 50, "month", 1),
-    ("pro", "Pro / Premium", "299000.00", 30, 50, "month", 1),
-    ("team", "Team", "1199000.00", 30, 100, "month", 5),
-    ("usage_based", "Usage-Based", "29000.00", 1, 20, "usage", 1),
+    ("standard", "Standard", "2000.00", 15, 50, "month", 1),
+    ("pro", "Pro / Premium", "3000.00", 30, 50, "month", 1),
+    ("team", "Team", "4000.00", 30, 100, "month", 5),
+    ("usage_based", "Usage-Based", "1000.00", 1, 20, "usage", 1),
 )
 
 _DEFAULT_LIMITS: tuple[tuple[str, str, str, str, int | None], ...] = (
@@ -409,6 +417,7 @@ def _active_plans(cur, external_auth_id: str) -> list[_Plan]:
           and s.status = 'active'
           and s.start_at <= now()
           and (s.end_at is null or s.end_at > now())
+        order by s.start_at desc, s.id desc
         """,
         (external_auth_id,),
     )
