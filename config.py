@@ -86,3 +86,17 @@ CORS_ORIGIN_REGEX = os.getenv(
 # Supabase PostgreSQL connection. Must point at the transaction pooler
 # host on port 6543 for low-latency pooled access.
 DATABASE_URL: str | None = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+
+# ---------------------------------------------------------------------------
+# payOS billing
+# ---------------------------------------------------------------------------
+
+PAYOS_CLIENT_ID: str | None = os.getenv("PAYOS_CLIENT_ID")
+PAYOS_API_KEY: str | None = os.getenv("PAYOS_API_KEY")
+PAYOS_CHECKSUM_KEY: str | None = os.getenv("PAYOS_CHECKSUM_KEY")
+PAYOS_API_BASE: str = os.getenv("PAYOS_API_BASE", "https://api-merchant.payos.vn").rstrip("/")
+
+FRONTEND_BASE_URL: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+PAYOS_RETURN_URL: str = os.getenv("PAYOS_RETURN_URL", f"{FRONTEND_BASE_URL}/billing/return")
+PAYOS_CANCEL_URL: str = os.getenv("PAYOS_CANCEL_URL", f"{FRONTEND_BASE_URL}/billing/cancel")
+BILLING_JOB_SECRET: str | None = os.getenv("BILLING_JOB_SECRET")

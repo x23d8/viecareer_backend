@@ -21,6 +21,8 @@ def _err(code: str, message: str, retry: bool) -> dict:
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    if isinstance(exc.detail, dict):
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
     if exc.status_code in _STATUS_MAP:
         code, message, retry = _STATUS_MAP[exc.status_code]
         return JSONResponse(status_code=exc.status_code, content=_err(code, message, retry))
