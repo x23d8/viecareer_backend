@@ -377,8 +377,38 @@ def _ensure_tracking_schema(cur) -> None:
         )
         cur.execute(
             """
+            create index if not exists idx_api_usage_logs_user_model_time
+            on api_usage_logs (user_id, model, occurred_at desc)
+            """
+        )
+        cur.execute(
+            """
+            create index if not exists idx_api_usage_logs_user_feature_time
+            on api_usage_logs (user_id, feature, occurred_at desc)
+            """
+        )
+        cur.execute(
+            """
+            create index if not exists idx_api_usage_logs_external_time
+            on api_usage_logs (external_auth_id, occurred_at desc)
+            """
+        )
+        cur.execute(
+            """
             create index if not exists idx_user_activity_events_user_time
             on user_activity_events (user_id, occurred_at desc)
+            """
+        )
+        cur.execute(
+            """
+            create index if not exists idx_user_activity_events_user_name_time
+            on user_activity_events (user_id, event_name, occurred_at desc)
+            """
+        )
+        cur.execute(
+            """
+            create index if not exists idx_user_activity_events_external_time
+            on user_activity_events (external_auth_id, occurred_at desc)
             """
         )
         cur.execute(
