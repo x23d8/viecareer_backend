@@ -17,7 +17,7 @@ from core.exceptions import (
 )
 from core.middleware import AsyncTimeoutMiddleware, PayloadSizeLimitMiddleware
 from core.rate_limit import limiter
-from routers import admin, analysis, analytics, auth, billing, chat, database, events, files, health, interview_simulation, realtime
+from routers import admin, analysis, analytics, auth, billing, chat, database, events, feedback, files, health, interview_simulation, realtime
 
 logging.basicConfig(level=logging.INFO)
 
@@ -68,6 +68,7 @@ app.include_router(auth.router)
 app.include_router(billing.router)
 app.include_router(analytics.router)
 app.include_router(events.router)
+app.include_router(feedback.router)
 app.include_router(files.router)
 app.include_router(chat.router)
 app.include_router(analysis.router)
