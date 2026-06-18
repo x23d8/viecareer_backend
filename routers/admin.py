@@ -23,7 +23,7 @@ from core.database import get_connection
 from core.rate_limit import limiter
 from schemas.events import LandingMetricGroupBy, LandingSource
 from services.admin_user_service import UserMetricGroupBy, get_admin_user_metrics, list_admin_users
-from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics
+from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics as get_feature_metrics_service
 from services.landing_event_service import ensure_landing_events_schema, get_landing_metrics
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -297,13 +297,14 @@ def get_admin_overview(
                 ]
 
         days = max(1, (end_at.date() - start_at.date()).days)
-        feature_metrics = get_feature_metrics(
+        feature_metrics = get_feature_metrics_service(
             days=days,
             group_by=group_by,
             date_from=start_at.date(),
             date_to=(end_at - timedelta(days=1)).date(),
         )
     except Exception as exc:
+        logger.exception("Could not load admin overview")
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not load admin overview.",

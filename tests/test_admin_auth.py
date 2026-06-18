@@ -76,7 +76,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         })
         active_patch.start()
         self._patches.append(active_patch)
-        active_patch = patch("routers.admin.get_feature_metrics", return_value={"features": []})
+        active_patch = patch("routers.admin.get_feature_metrics_service", return_value={"features": []})
         active_patch.start()
         self._patches.append(active_patch)
         active_patch = patch("routers.admin.get_connection", return_value=FakeOverviewConnection())
