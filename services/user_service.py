@@ -29,29 +29,22 @@ def upsert_auth_user(
 
                 cur.execute(
                     """
-                    select id
+                    select id, email
                     from users
-                    where external_auth_id = %s or email = %s
+                    where external_auth_id = %s
                     for update
                     """,
-                    (external_auth_id, email),
+                    (external_auth_id,),
                 )
-                matches = cur.fetchall()
+                linked_user = cur.fetchone()
 
-                if len(matches) > 1:
-                    raise HTTPException(
-                        status.HTTP_409_CONFLICT,
-                        detail="Clerk user id and email are already linked to different users.",
-                    )
-
-                if matches:
+                if linked_user:
                     cur.execute(
                         """
                         update users
                         set
                           external_auth_id = %s,
                           auth_provider = %s,
-                          email = %s,
                           full_name = %s,
                           avatar_url = %s,
                           status = case
@@ -66,14 +59,36 @@ def upsert_auth_user(
                         (
                             external_auth_id,
                             auth_provider,
-                            email,
                             full_name,
                             avatar_url,
-                            matches[0]["id"],
+                            linked_user["id"],
                         ),
                     )
                     row = cur.fetchone()
                 else:
+                    # Never claim an existing account by an email supplied by the
+                    # browser. Email-based linking allowed a newly authenticated
+                    # Clerk user to attach their external_auth_id to a privileged
+                    # legacy row while preserving that row's role_id.
+                    cur.execute(
+                        """
+                        select id, external_auth_id
+                        from users
+                        where lower(email) = lower(%s)
+                        for update
+                        """,
+                        (email,),
+                    )
+                    email_owner = cur.fetchone()
+                    if email_owner:
+                        raise HTTPException(
+                            status.HTTP_409_CONFLICT,
+                            detail=(
+                                "This email already belongs to an existing profile. "
+                                "Contact support to link the account safely."
+                            ),
+                        )
+
                     cur.execute(
                         """
                         insert into users (

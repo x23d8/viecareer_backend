@@ -74,9 +74,14 @@ _raw_origins = os.getenv(
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 # Regex fallback — allows localhost during local dev without any env override.
+_default_cors_origin_regex = (
+    r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+    if APP_ENV in {"development", "dev", "test"}
+    else r"(?!)"
+)
 CORS_ORIGIN_REGEX = os.getenv(
     "CORS_ORIGIN_REGEX",
-    r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    _default_cors_origin_regex,
 )
 
 # ---------------------------------------------------------------------------

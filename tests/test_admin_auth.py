@@ -143,6 +143,8 @@ class FakeConnection:
 class FakeCursor:
     def __init__(self, role_id: int | None):
         self.role_id = role_id
+        self.last_query = ""
+        self.last_params = None
 
     def __enter__(self):
         return self
@@ -151,6 +153,8 @@ class FakeCursor:
         return False
 
     def execute(self, query, params):
+        self.last_query = " ".join(query.split()).lower()
+        self.last_params = params
         return None
 
     def fetchone(self):
