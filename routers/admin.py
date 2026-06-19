@@ -13,21 +13,18 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
-    Response,
     status,
 )
 from fastapi.responses import StreamingResponse
+from config import BILLING_VND_PER_USD
 from core.api_usage import ensure_tracking_tables
 from core.clerk_auth import AdminUser, require_admin
 from core.database import get_connection
 from core.rate_limit import limiter
+from schemas.admin import AdminUserStatusRequest
 from schemas.events import LandingMetricGroupBy, LandingSource
-from services.admin_user_service import UserMetricGroupBy, get_admin_user_metrics, list_admin_users
 from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics as get_feature_metrics_service
 from services.landing_event_service import ensure_landing_events_schema, get_landing_metrics
-
-router = APIRouter(prefix="/api/admin", tags=["admin"])
-logger = logging.getLogger("viecareer")
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger("viecareer")
@@ -36,7 +33,7 @@ GroupBy = Literal["day", "week", "month"]
 UserStatus = Literal["active", "suspended", "pending"]
 SessionStatus = Literal["completed", "in_progress", "scheduled", "cancelled"]
 SessionType = Literal["technical", "behavioral", "mixed", "coding"]
-ActivityType = Literal["Auth", "Session", "Payment", "Account", "System"]
+PaymentStatus = Literal["success", "pending", "failed"]
 
 FEATURE_DEFINITIONS: dict[str, dict[str, str]] = {
     "page_view": {
@@ -87,8 +84,6 @@ FEATURE_DEFINITIONS: dict[str, dict[str, str]] = {
 }
 
 FEATURE_KEYS = list(FEATURE_DEFINITIONS.keys())
-ACTIVITY_TYPES: tuple[ActivityType, ...] = ("Auth", "Session", "Payment", "Account", "System")
-
 ACTIVITY_FEATURE_CASE = """
 case
   when event_name = 'file_parse' then 'upload_cv'
@@ -155,10 +150,6 @@ def _date_window(date_from: date | None, date_to: date | None, days: int | None 
     return start_at, end_at
 
 
-def _money(value: Any) -> str:
-    return str(Decimal(str(value or 0)).quantize(Decimal("0.000001")))
-
-
 def _ensure_activity_logs_schema() -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -206,24 +197,66 @@ def get_admin_overview(
                     with latest_subscription as (
                       select distinct on (user_id) user_id, plan_id, status
                       from user_subscriptions
+                      where status = 'active'
+                        and (end_at is null or end_at >= now())
                       order by user_id, start_at desc, id desc
                     )
                     select
                       count(u.*)::int as total_users,
                       count(u.*) filter (where coalesce(p.code, 'free') = 'free')::int as free_users,
-                      coalesce(sum(
-                        case
-                          when ls.status = 'active'
-                          then coalesce(nullif(regexp_replace(p.monthly_price::text, '[^0-9.-]', '', 'g'), '')::numeric, 0)
-                          else 0
-                        end
-                      ), 0) as revenue
+                      count(u.*) filter (where coalesce(p.code, 'free') = 'pro')::int as pro_users,
+                      count(u.*) filter (where coalesce(p.code, 'free') <> 'free')::int as paid_users
                     from users u
                     left join latest_subscription ls on ls.user_id = u.id
                     left join plans p on p.id = ls.plan_id
                     """
                 )
                 user_totals = dict(cur.fetchone() or {})
+
+                cur.execute(
+                    """
+                    with latest_subscription as (
+                      select distinct on (user_id) user_id, plan_id
+                      from user_subscriptions
+                      where status = 'active'
+                        and (end_at is null or end_at >= now())
+                      order by user_id, start_at desc, id desc
+                    ),
+                    effective_users as (
+                      select
+                        u.id as user_id,
+                        coalesce(p.code, 'free') as plan_code
+                      from users u
+                      left join latest_subscription ls on ls.user_id = u.id
+                      left join plans p on p.id = ls.plan_id
+                    )
+                    select
+                      p.code as plan_code,
+                      p.name as plan_name,
+                      count(eu.user_id)::int as users,
+                      (p.code <> 'free') as is_paid,
+                      (
+                        count(eu.user_id)
+                        * coalesce(nullif(regexp_replace(p.monthly_price::text, '[^0-9.-]', '', 'g'), '')::numeric, 0)
+                      ) as monthly_revenue
+                    from plans p
+                    left join effective_users eu on eu.plan_code = p.code
+                    group by p.code, p.name, p.monthly_price
+                    order by
+                      case when p.code = 'free' then 0 else 1 end,
+                      p.code
+                    """
+                )
+                users_by_plan = [
+                    {
+                        "plan_code": row["plan_code"],
+                        "plan_name": row["plan_name"],
+                        "users": int(row.get("users") or 0),
+                        "is_paid": bool(row.get("is_paid")),
+                        "monthly_revenue": _money(row.get("monthly_revenue")),
+                    }
+                    for row in cur.fetchall()
+                ]
 
                 cur.execute(
                     """
@@ -261,6 +294,18 @@ def get_admin_overview(
 
                 cur.execute(
                     """
+                    select coalesce(sum(amount_vnd), 0) as total_revenue_vnd
+                    from payment_transactions
+                    where status = 'paid'
+                      and coalesce(paid_at, created_at) >= %s
+                      and coalesce(paid_at, created_at) < %s
+                    """,
+                    (start_at, end_at),
+                )
+                payment_totals = dict(cur.fetchone() or {})
+
+                cur.execute(
+                    """
                     select
                       date_trunc(%s, occurred_at)::date as period,
                       coalesce(sum(cost_usd), 0) as total_cost_usd
@@ -279,20 +324,19 @@ def get_admin_overview(
                 cur.execute(
                     """
                     select
-                      date_trunc('month', coalesce(ls.start_at, now()))::date as period,
-                      coalesce(sum(coalesce(nullif(regexp_replace(p.monthly_price::text, '[^0-9.-]', '', 'g'), '')::numeric, 0)), 0) as revenue
-                    from user_subscriptions ls
-                    join plans p on p.id = ls.plan_id
-                    where ls.status = 'active'
-                      and ls.start_at >= %s
-                      and ls.start_at < %s
+                      date_trunc(%s, coalesce(paid_at, created_at))::date as period,
+                      coalesce(sum(amount_vnd), 0) as revenue_vnd
+                    from payment_transactions
+                    where status = 'paid'
+                      and coalesce(paid_at, created_at) >= %s
+                      and coalesce(paid_at, created_at) < %s
                     group by period
                     order by period asc
                     """,
-                    (start_at, end_at),
+                    (group_by, start_at, end_at),
                 )
-                revenue_by_month = [
-                    {"period": row["period"], "revenue": _money(row["revenue"])}
+                revenue_trend = [
+                    {"period": row["period"], "revenue": _usd_from_vnd(row["revenue_vnd"])}
                     for row in cur.fetchall()
                 ]
 
@@ -318,82 +362,30 @@ def get_admin_overview(
                 "date_to": (end_at - timedelta(days=1)).date(),
                 "group_by": group_by,
             },
+            "total_revenue_usd": _usd_from_vnd(payment_totals.get("total_revenue_vnd")),
+            "free_users_count": int(user_totals.get("free_users") or 0),
+            "pro_users_count": int(user_totals.get("pro_users") or 0),
             "kpis": {
                 "total_users": int(user_totals.get("total_users") or 0),
                 "free_users": int(user_totals.get("free_users") or 0),
+                "free_users_count": int(user_totals.get("free_users") or 0),
+                "pro_users_count": int(user_totals.get("pro_users") or 0),
+                "paid_users": int(user_totals.get("paid_users") or 0),
                 "cv_jd_analyses": int(cv_totals.get("cv_jd_analyses") or 0),
                 "completed_interviews": int(session_totals.get("completed_interviews") or 0),
                 "total_ai_cost_usd": _money(ai_totals.get("total_ai_cost_usd")),
-                "revenue": _money(user_totals.get("revenue")),
+                "total_revenue_usd": _usd_from_vnd(payment_totals.get("total_revenue_vnd")),
+                "revenue": _usd_from_vnd(payment_totals.get("total_revenue_vnd")),
                 "ai_calls": int(ai_totals.get("ai_calls") or 0),
             },
+            "users_by_plan": users_by_plan,
             "landing_metrics": landing,
             "function_metrics": feature_metrics["features"],
             "charts": {
                 "landing_visits": landing["trend"],
                 "ai_cost_by_day": ai_cost_by_day,
-                "revenue_by_month": revenue_by_month,
+                "revenue": revenue_trend,
             },
-        }
-    }
-
-
-@router.get("/feature-metrics")
-def get_feature_metrics(
-    days: int = Query(30, ge=1, le=365),
-    group_by: GroupBy = Query("day"),
-    current_admin: AdminUser = Depends(require_admin),
-):
-    del current_admin
-    try:
-        ensure_tracking_tables()
-        ensure_landing_events_schema()
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                features = _empty_feature_map()
-                _merge_feature_counts(features, _fetch_activity_feature_counts(cur, days))
-                _merge_feature_counts(features, _fetch_landing_feature_counts(cur, days))
-                _merge_ai_counts(features, _fetch_ai_feature_counts(cur, days))
-                _merge_completion_counts(features, _fetch_completion_counts(cur, days))
-
-                trend = _fetch_feature_trend(cur, days, group_by)
-                top_pages = _fetch_top_pages(cur, days)
-                dropoff = _fetch_interview_dropoff(cur, days)
-                active_users = _fetch_feature_active_users(cur, days)
-                window = _window_payload(days, group_by)
-    except Exception as exc:
-        logger.exception("Could not load admin feature metrics")
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not load feature metrics.",
-        ) from exc
-
-    feature_rows = [_feature_payload(key, values) for key, values in features.items()]
-    top_feature = max(feature_rows, key=lambda item: item["events"], default=None)
-    if top_feature and top_feature["events"] <= 0:
-        top_feature = None
-
-    cv_feature = features["cv_jd_analysis"]
-    summary = {
-        "total_events": sum(item["events"] for item in feature_rows),
-        "active_users": active_users,
-        "ai_calls": sum(item["ai_calls"] for item in feature_rows),
-        "total_cost_usd": _money(sum(Decimal(str(item["total_cost_usd"])) for item in feature_rows)),
-        "cv_uploads": features["upload_cv"]["events"],
-        "resume_reviews": max(cv_feature["completions"], cv_feature["ai_calls"]),
-        "completed_mock_interviews": dropoff["completed"],
-        "abandoned_interviews": dropoff["abandoned"],
-        "most_used_feature": top_feature,
-    }
-
-    return {
-        "data": {
-            "window": window,
-            "summary": summary,
-            "features": feature_rows,
-            "trend": trend,
-            "top_pages": top_pages,
-            "dropoffs": {"realtime_interview": dropoff},
         }
     }
 
@@ -462,6 +454,158 @@ def list_admin_users(
                 "active": int(stats.get("active") or 0),
                 "suspended": int(stats.get("suspended") or 0),
                 "pending": int(stats.get("pending") or 0),
+            },
+            "items": items,
+            "pagination": {"limit": limit, "offset": offset, "total": total},
+        }
+    }
+
+
+@router.patch("/users/{user_id}/status")
+def update_admin_user_status(
+    user_id: str,
+    payload: AdminUserStatusRequest,
+    current_admin: AdminUser = Depends(require_admin),
+):
+    internal_user_id = _uuid_or_404(user_id, "Invalid user id.")
+    if payload.status == "suspended" and internal_user_id == current_admin.internal_user_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="You cannot suspend your own account.")
+
+    try:
+        _ensure_activity_logs_schema()
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update users
+                    set status = %s, updated_at = now()
+                    where id = %s
+                    returning id, email, full_name, status, updated_at
+                    """,
+                    (payload.status, internal_user_id),
+                )
+                user = cur.fetchone()
+                if not user:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+                cur.execute(
+                    """
+                    insert into activity_logs (
+                      actor_user_id, target_user_id, log_type, action, detail, meta_json
+                    )
+                    values (%s, %s, 'account', %s, %s, %s::jsonb)
+                    """,
+                    (
+                        current_admin.internal_user_id,
+                        internal_user_id,
+                        f"user_{payload.status}",
+                        f"User status changed to {payload.status}",
+                        '{"status":"' + payload.status + '"}',
+                    ),
+                )
+            conn.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not update admin user status")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not update user status.",
+        ) from exc
+
+    return {
+        "data": {
+            "id": str(user["id"]),
+            "email": user.get("email"),
+            "full_name": user.get("full_name"),
+            "status": user.get("status"),
+            "updated_at": _iso(user.get("updated_at")),
+        }
+    }
+
+
+@router.get("/payments")
+def list_admin_payments(
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str | None = Query(default=None, max_length=120),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    status_filter: PaymentStatus | None = Query(default=None, alias="status"),
+    current_admin: AdminUser = Depends(require_admin),
+):
+    del current_admin
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="date_from must be on or before date_to.")
+
+    where_sql, params = _payment_filters(search, date_from, date_to, status_filter)
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    select
+                      count(*)::int as total,
+                      count(*) filter (where pt.status = 'paid')::int as success,
+                      count(*) filter (where pt.status = 'pending')::int as pending,
+                      count(*) filter (where pt.status in ('failed', 'cancelled', 'expired'))::int as failed,
+                      coalesce(sum(pt.amount_vnd) filter (where pt.status = 'paid'), 0) as total_revenue_vnd
+                    from payment_transactions pt
+                    join users u on u.id = pt.user_id
+                    {where_sql}
+                    """,
+                    params,
+                )
+                stats = dict(cur.fetchone() or {})
+
+                cur.execute(
+                    f"""
+                    select
+                      pt.id,
+                      pt.user_id,
+                      u.email,
+                      u.full_name,
+                      pt.plan_id,
+                      p.code as plan_code,
+                      p.name as plan_name,
+                      pt.provider,
+                      pt.order_code,
+                      pt.payment_link_id,
+                      pt.amount_vnd,
+                      pt.currency,
+                      pt.status,
+                      pt.description,
+                      pt.paid_at,
+                      pt.created_at,
+                      pt.updated_at
+                    from payment_transactions pt
+                    join users u on u.id = pt.user_id
+                    join plans p on p.id = pt.plan_id
+                    {where_sql}
+                    order by coalesce(pt.paid_at, pt.created_at) desc, pt.id desc
+                    limit %s offset %s
+                    """,
+                    [*params, limit, offset],
+                )
+                items = [_admin_payment_payload(row) for row in cur.fetchall()]
+    except Exception as exc:
+        logger.exception("Could not load admin payments")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not load payments.",
+        ) from exc
+
+    total = int(stats.get("total") or 0)
+    total_revenue_vnd = int(stats.get("total_revenue_vnd") or 0)
+    return {
+        "data": {
+            "stats": {
+                "total": total,
+                "success": int(stats.get("success") or 0),
+                "pending": int(stats.get("pending") or 0),
+                "failed": int(stats.get("failed") or 0),
+                "total_revenue_vnd": total_revenue_vnd,
+                "total_revenue_usd": _usd_from_vnd(total_revenue_vnd),
             },
             "items": items,
             "pagination": {"limit": limit, "offset": offset, "total": total},
@@ -605,141 +749,6 @@ def list_admin_sessions(
     }
 
 
-@router.get("/activity/logs")
-def list_activity_logs(
-    limit: int = Query(10, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    search: str | None = Query(default=None, max_length=120),
-    type_filter: ActivityType | None = Query(default=None, alias="type"),
-    current_admin: AdminUser = Depends(require_admin),
-):
-    del current_admin
-    try:
-        ensure_tracking_tables()
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                where_sql, params = _activity_filters(search, type_filter)
-                base_query = _activity_base_query()
-                cur.execute(
-                    f"""
-                    select
-                      count(*)::int as total,
-                      count(*) filter (where occurred_at::date = current_date)::int as today
-                    from ({base_query}) a
-                    {where_sql}
-                    """,
-                    params,
-                )
-                stats_row = cur.fetchone() or {}
-
-                cur.execute(
-                    f"""
-                    select type, count(*)::int as total
-                    from ({base_query}) a
-                    {where_sql}
-                    group by type
-                    """,
-                    params,
-                )
-                type_counts = {item: 0 for item in ACTIVITY_TYPES}
-                for row in cur.fetchall():
-                    row_type = row.get("type")
-                    if row_type in type_counts:
-                        type_counts[row_type] = int(row.get("total") or 0)
-
-                cur.execute(
-                    f"""
-                    select count(*)::int as total
-                    from ({base_query}) a
-                    {where_sql}
-                    """,
-                    params,
-                )
-                total = int((cur.fetchone() or {}).get("total") or 0)
-
-                cur.execute(
-                    f"""
-                    select *
-                    from ({base_query}) a
-                    {where_sql}
-                    order by occurred_at desc
-                    limit %s offset %s
-                    """,
-                    [*params, limit, offset],
-                )
-                items = [_activity_payload(row) for row in cur.fetchall()]
-    except Exception as exc:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not load activity logs.",
-        ) from exc
-
-    return {
-        "data": {
-            "stats": {
-                "total": int(stats_row.get("total") or 0),
-                "today": int(stats_row.get("today") or 0),
-            },
-            "type_counts": type_counts,
-            "items": items,
-            "pagination": {"limit": limit, "offset": offset, "total": total},
-        }
-    }
-
-
-@router.get("/activity/logs.csv")
-def export_activity_logs_csv(
-    search: str | None = Query(default=None, max_length=120),
-    type_filter: ActivityType | None = Query(default=None, alias="type"),
-    current_admin: AdminUser = Depends(require_admin),
-):
-    del current_admin
-    try:
-        ensure_tracking_tables()
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                where_sql, params = _activity_filters(search, type_filter)
-                cur.execute(
-                    f"""
-                    select *
-                    from ({_activity_base_query()}) a
-                    {where_sql}
-                    order by occurred_at desc
-                    limit 5000
-                    """,
-                    params,
-                )
-                rows = cur.fetchall()
-    except Exception as exc:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not export activity logs.",
-        ) from exc
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["id", "timestamp", "type", "user", "email", "action", "detail", "success", "duration_ms"])
-    for row in rows:
-        writer.writerow(
-            [
-                row.get("id"),
-                _iso(row.get("occurred_at")),
-                row.get("type"),
-                row.get("user_name"),
-                row.get("email"),
-                row.get("action"),
-                row.get("detail"),
-                row.get("success"),
-                row.get("duration_ms"),
-            ]
-        )
-    return Response(
-        content=buffer.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=viecareer-activity-logs.csv"},
-    )
-
-
 @router.get("/usage/summary")
 def get_usage_summary(
     days: int = Query(28, ge=1, le=90),
@@ -808,64 +817,26 @@ def get_usage_summary(
 @limiter.limit("30/minute")
 def get_admin_feature_metrics(
     request: Request,
-    days: int = Query(30, ge=1, le=180),
+    days: int = Query(30, ge=1, le=365),
     group_by: FeatureGroupBy = Query(default="day"),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
     current_admin: AdminUser = Depends(require_admin),
 ):
-    try:
-        return {"data": get_feature_metrics(days=days, group_by=group_by)}
-    except Exception as exc:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not load feature metrics.",
-        ) from exc
-
-
-@router.get("/users")
-@limiter.limit("30/minute")
-def get_admin_users(
-    request: Request,
-    limit: int = Query(25, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    search: str | None = Query(default=None, max_length=120),
-    status_filter: str | None = Query(default=None, alias="status"),
-    plan_filter: str | None = Query(default=None, alias="plan"),
-    current_admin: AdminUser = Depends(require_admin),
-):
+    del request, current_admin
     try:
         return {
-            "data": list_admin_users(
-                limit=limit,
-                offset=offset,
-                search=search.strip() if search else None,
-                status_filter=status_filter,
-                plan_filter=plan_filter,
+            "data": get_feature_metrics_service(
+                days=days,
+                group_by=group_by,
+                date_from=date_from,
+                date_to=date_to,
             )
         }
     except Exception as exc:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not load users.",
-        ) from exc
-
-
-@router.get("/users/{user_id}/metrics")
-@limiter.limit("30/minute")
-def get_admin_user_metric_detail(
-    request: Request,
-    user_id: str,
-    days: int = Query(30, ge=1, le=180),
-    group_by: UserMetricGroupBy = Query(default="day"),
-    current_admin: AdminUser = Depends(require_admin),
-):
-    try:
-        return {"data": get_admin_user_metrics(user_id=user_id, days=days, group_by=group_by)}
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not load user metrics.",
+            detail="Could not load feature metrics.",
         ) from exc
 
 
@@ -922,33 +893,16 @@ def get_admin_activity_logs(
     offset: int = Query(0, ge=0),
     current_admin: AdminUser = Depends(require_admin),
 ):
+    del request, current_admin
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="date_from must be on or before date_to.")
+
     try:
+        ensure_tracking_tables()
         _ensure_activity_logs_schema()
         start_at, end_at = _date_window(date_from, date_to)
-        where_parts = ["l.created_at >= %s", "l.created_at < %s"]
-        params: list[Any] = [start_at, end_at]
-
-        if type_filter and type_filter != "all":
-            where_parts.append("l.log_type = %s")
-            params.append(type_filter.lower())
-
-        if search:
-            term = f"%{search.strip()}%"
-            where_parts.append(
-                """
-                (
-                  l.action ilike %s
-                  or coalesce(l.detail, '') ilike %s
-                  or coalesce(actor.email, '') ilike %s
-                  or coalesce(actor.full_name, '') ilike %s
-                  or coalesce(target.email, '') ilike %s
-                  or coalesce(target.full_name, '') ilike %s
-                )
-                """
-            )
-            params.extend([term, term, term, term, term, term])
-
-        where_sql = " and ".join(where_parts)
+        where_sql, params = _unified_activity_filters(start_at, end_at, type_filter, search)
+        base_query = _unified_activity_base_query()
 
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -956,16 +910,14 @@ def get_admin_activity_logs(
                     f"""
                     select
                       count(*)::int as total,
-                      count(*) filter (where l.created_at::date = current_date)::int as today,
-                      count(*) filter (where l.log_type = 'auth')::int as auth,
-                      count(*) filter (where l.log_type = 'session')::int as session,
-                      count(*) filter (where l.log_type = 'payment')::int as payment,
-                      count(*) filter (where l.log_type = 'account')::int as account,
-                      count(*) filter (where l.log_type = 'system')::int as system
-                    from activity_logs l
-                    left join users actor on actor.id = l.actor_user_id
-                    left join users target on target.id = l.target_user_id
-                    where {where_sql}
+                      count(*) filter (where a.created_at::date = current_date)::int as today,
+                      count(*) filter (where a.log_type = 'auth')::int as auth,
+                      count(*) filter (where a.log_type = 'session')::int as session,
+                      count(*) filter (where a.log_type = 'payment')::int as payment,
+                      count(*) filter (where a.log_type = 'account')::int as account,
+                      count(*) filter (where a.log_type = 'system')::int as system
+                    from ({base_query}) a
+                    {where_sql}
                     """,
                     params,
                 )
@@ -973,31 +925,17 @@ def get_admin_activity_logs(
 
                 cur.execute(
                     f"""
-                    select
-                      l.id,
-                      l.created_at,
-                      l.log_type,
-                      l.action,
-                      l.detail,
-                      l.ip_address,
-                      l.meta_json,
-                      actor.id as actor_user_id,
-                      actor.email as actor_email,
-                      actor.full_name as actor_full_name,
-                      target.id as target_user_id,
-                      target.email as target_email,
-                      target.full_name as target_full_name
-                    from activity_logs l
-                    left join users actor on actor.id = l.actor_user_id
-                    left join users target on target.id = l.target_user_id
-                    where {where_sql}
-                    order by l.created_at desc, l.id desc
+                    select *
+                    from ({base_query}) a
+                    {where_sql}
+                    order by a.created_at desc, a.id desc
                     limit %s offset %s
                     """,
                     [*params, limit, offset],
                 )
                 items = [dict(row) for row in cur.fetchall()]
     except Exception as exc:
+        logger.exception("Could not load unified activity logs")
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not load activity logs.",
@@ -1021,76 +959,42 @@ def export_admin_activity_logs(
     search: str | None = Query(default=None, max_length=120),
     current_admin: AdminUser = Depends(require_admin),
 ):
+    del current_admin
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="date_from must be on or before date_to.")
+
     try:
+        ensure_tracking_tables()
         _ensure_activity_logs_schema()
         start_at, end_at = _date_window(date_from, date_to)
-        where_parts = ["l.created_at >= %s", "l.created_at < %s"]
-        params: list[Any] = [start_at, end_at]
-        if type_filter and type_filter != "all":
-            where_parts.append("l.log_type = %s")
-            params.append(type_filter.lower())
-        if search:
-            term = f"%{search.strip()}%"
-            where_parts.append(
-                """
-                (
-                  l.action ilike %s
-                  or coalesce(l.detail, '') ilike %s
-                  or coalesce(actor.email, '') ilike %s
-                  or coalesce(actor.full_name, '') ilike %s
-                )
-                """
-            )
-            params.extend([term, term, term, term])
-        where_sql = " and ".join(where_parts)
-
+        where_sql, params = _unified_activity_filters(start_at, end_at, type_filter, search)
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    select
-                      l.id,
-                      l.created_at,
-                      l.log_type,
-                      l.action,
-                      l.detail,
-                      l.ip_address,
-                      actor.email as actor_email,
-                      actor.full_name as actor_full_name,
-                      target.email as target_email,
-                      target.full_name as target_full_name
-                    from activity_logs l
-                    left join users actor on actor.id = l.actor_user_id
-                    left join users target on target.id = l.target_user_id
-                    where {where_sql}
-                    order by l.created_at desc, l.id desc
+                    select *
+                    from ({_unified_activity_base_query()}) a
+                    {where_sql}
+                    order by a.created_at desc, a.id desc
                     limit 5000
                     """,
                     params,
                 )
                 rows = [dict(row) for row in cur.fetchall()]
     except Exception as exc:
+        logger.exception("Could not export unified activity logs")
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not export activity logs.",
         ) from exc
 
     output = io.StringIO()
-    writer = csv.DictWriter(
-        output,
-        fieldnames=[
-            "id",
-            "created_at",
-            "log_type",
-            "action",
-            "detail",
-            "ip_address",
-            "actor_email",
-            "actor_full_name",
-            "target_email",
-            "target_full_name",
-        ],
-    )
+    fieldnames = [
+        "id", "created_at", "log_type", "action", "detail", "ip_address",
+        "actor_user_id", "actor_email", "actor_full_name", "target_user_id",
+        "target_email", "target_full_name", "source",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
     output.seek(0)
@@ -1364,93 +1268,6 @@ def get_admin_ai_cost_events(
             "pagination": {"limit": limit, "offset": offset, "total": total},
         }
     }
-
-
-@router.get("/sessions")
-@limiter.limit("30/minute")
-def get_admin_sessions(
-    request: Request,
-    limit: int = Query(25, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    search: str | None = Query(default=None, max_length=120),
-    status_filter: str | None = Query(default=None, alias="status"),
-    session_type: str | None = Query(default=None, alias="type"),
-    current_admin: AdminUser = Depends(require_admin),
-):
-    try:
-        where_parts = ["true"]
-        params: list[Any] = []
-        if search:
-            term = f"%{search.strip()}%"
-            where_parts.append(
-                """
-                (
-                  coalesce(u.email, '') ilike %s
-                  or coalesce(u.full_name, '') ilike %s
-                  or coalesce(s.position, '') ilike %s
-                  or coalesce(s.company, '') ilike %s
-                )
-                """
-            )
-            params.extend([term, term, term, term])
-        if status_filter and status_filter != "all":
-            where_parts.append("s.status = %s")
-            params.append(status_filter)
-        if session_type and session_type != "all":
-            where_parts.append("s.session_type = %s")
-            params.append(session_type)
-        where_sql = " and ".join(where_parts)
-
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    select
-                      count(*)::int as total,
-                      count(*) filter (where s.status = 'completed')::int as completed,
-                      count(*) filter (where s.status = 'in_progress')::int as in_progress,
-                      count(*) filter (where s.status = 'scheduled')::int as scheduled,
-                      coalesce(round(avg(s.overall_score) filter (where s.overall_score is not null))::int, 0) as avg_score
-                    from interview_sessions s
-                    left join users u on u.id = s.user_id
-                    where {where_sql}
-                    """,
-                    params,
-                )
-                stats = dict(cur.fetchone() or {})
-
-                cur.execute(
-                    f"""
-                    select
-                      s.id,
-                      s.user_id,
-                      u.email,
-                      u.full_name,
-                      s.position,
-                      s.company,
-                      s.session_type,
-                      s.status,
-                      s.started_at,
-                      s.ended_at,
-                      s.duration_seconds,
-                      s.overall_score,
-                      s.created_at
-                    from interview_sessions s
-                    left join users u on u.id = s.user_id
-                    where {where_sql}
-                    order by coalesce(s.started_at, s.created_at) desc
-                    limit %s offset %s
-                    """,
-                    [*params, limit, offset],
-                )
-                items = [dict(row) for row in cur.fetchall()]
-    except Exception as exc:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not load sessions.",
-        ) from exc
-
-    return {"data": {"stats": stats, "items": items, "pagination": {"limit": limit, "offset": offset, "total": int(stats.get("total") or 0)}}}
 
 
 @router.get("/landing-metrics")
@@ -2019,6 +1836,69 @@ def _user_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _payment_filters(
+    search: str | None,
+    date_from: date | None,
+    date_to: date | None,
+    status_filter: PaymentStatus | None,
+) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if search:
+        pattern = f"%{search.strip().lower()}%"
+        clauses.append(
+            """
+            (
+              lower(u.email) like %s
+              or lower(coalesce(u.full_name, '')) like %s
+              or pt.order_code::text like %s
+              or lower(coalesce(pt.payment_link_id, '')) like %s
+              or lower(coalesce(pt.description, '')) like %s
+            )
+            """
+        )
+        params.extend([pattern, pattern, pattern, pattern, pattern])
+    if date_from:
+        clauses.append("coalesce(pt.paid_at, pt.created_at) >= %s")
+        params.append(datetime.combine(date_from, time.min, tzinfo=timezone.utc))
+    if date_to:
+        clauses.append("coalesce(pt.paid_at, pt.created_at) < %s")
+        params.append(datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=timezone.utc))
+    if status_filter == "success":
+        clauses.append("pt.status = 'paid'")
+    elif status_filter == "pending":
+        clauses.append("pt.status = 'pending'")
+    elif status_filter == "failed":
+        clauses.append("pt.status in ('failed', 'cancelled', 'expired')")
+    return ("where " + " and ".join(clauses), params) if clauses else ("", params)
+
+
+def _admin_payment_payload(row: dict[str, Any]) -> dict[str, Any]:
+    raw_status = str(row.get("status") or "pending")
+    api_status = "success" if raw_status == "paid" else "pending" if raw_status == "pending" else "failed"
+    amount_vnd = int(row.get("amount_vnd") or 0)
+    return {
+        "id": row.get("id"),
+        "transaction_code": str(row.get("order_code") or row.get("payment_link_id") or row.get("id")),
+        "order_code": row.get("order_code"),
+        "payment_link_id": row.get("payment_link_id"),
+        "user_id": str(row.get("user_id")),
+        "email": row.get("email"),
+        "full_name": row.get("full_name"),
+        "plan": {"id": row.get("plan_id"), "code": row.get("plan_code"), "name": row.get("plan_name")},
+        "provider": row.get("provider"),
+        "amount_vnd": amount_vnd,
+        "amount_usd": _usd_from_vnd(amount_vnd),
+        "currency": row.get("currency") or "VND",
+        "status": api_status,
+        "provider_status": raw_status,
+        "description": row.get("description"),
+        "paid_at": _iso(row.get("paid_at")),
+        "created_at": _iso(row.get("created_at")),
+        "updated_at": _iso(row.get("updated_at")),
+    }
+
+
 def _session_filters(
     search: str | None,
     status_filter: str | None,
@@ -2069,26 +1949,37 @@ def _session_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _activity_base_query() -> str:
+def _unified_activity_base_query() -> str:
     return """
       select
-        e.id::text as id,
-        e.occurred_at,
-        e.event_name,
-        e.object_type,
-        e.object_id,
-        e.success,
-        e.duration_ms,
-        e.meta_json,
-        e.external_auth_id,
-        u.id::text as user_id,
-        u.email,
-        u.full_name,
+        'activity_log:' || l.id::text as id,
+        l.created_at,
+        l.log_type,
+        l.action,
+        l.detail,
+        l.ip_address,
+        l.meta_json,
+        actor.id::text as actor_user_id,
+        actor.email as actor_email,
+        actor.full_name as actor_full_name,
+        target.id::text as target_user_id,
+        target.email as target_email,
+        target.full_name as target_full_name,
+        'activity_logs'::text as source
+      from activity_logs l
+      left join users actor on actor.id = l.actor_user_id
+      left join users target on target.id = l.target_user_id
+
+      union all
+
+      select
+        'user_event:' || e.id::text as id,
+        e.occurred_at as created_at,
         case
-          when e.event_name in ('interview_started', 'interview_completed', 'realtime_token_created', 'report_saved') then 'Session'
-          when e.event_name in ('file_parse', 'cvjd_saved', 'cvjd_cache_hit') then 'Account'
-          else 'System'
-        end as type,
+          when e.event_name in ('interview_started', 'interview_completed', 'realtime_token_created', 'report_saved') then 'session'
+          when e.event_name in ('file_parse', 'cvjd_saved', 'cvjd_cache_hit') then 'account'
+          else 'system'
+        end as log_type,
         case
           when e.event_name = 'file_parse' then 'Parsed uploaded file'
           when e.event_name = 'cvjd_saved' then 'Saved CV/JD analysis'
@@ -2099,56 +1990,49 @@ def _activity_base_query() -> str:
           when e.event_name = 'report_saved' then 'Saved interview report'
           else e.event_name
         end as action,
-        coalesce(e.object_type, e.event_name) as detail
+        coalesce(e.object_type, e.event_name) as detail,
+        null::varchar(64) as ip_address,
+        e.meta_json,
+        u.id::text as actor_user_id,
+        u.email as actor_email,
+        u.full_name as actor_full_name,
+        null::text as target_user_id,
+        null::varchar(255) as target_email,
+        null::varchar(255) as target_full_name,
+        'user_activity_events'::text as source
       from user_activity_events e
       left join users u on u.id = e.user_id
     """
 
 
-def _activity_filters(search: str | None, type_filter: str | None) -> tuple[str, list[Any]]:
-    clauses: list[str] = []
-    params: list[Any] = []
+def _unified_activity_filters(
+    start_at: datetime,
+    end_at: datetime,
+    type_filter: str | None,
+    search: str | None,
+) -> tuple[str, list[Any]]:
+    clauses = ["a.created_at >= %s", "a.created_at < %s"]
+    params: list[Any] = [start_at, end_at]
+    if type_filter and type_filter.lower() != "all":
+        clauses.append("a.log_type = %s")
+        params.append(type_filter.lower())
     if search:
         pattern = f"%{search.strip().lower()}%"
         clauses.append(
             """
             (
-              lower(coalesce(a.full_name, '')) like %s
-              or lower(coalesce(a.email, '')) like %s
-              or lower(a.action) like %s
-              or lower(a.detail) like %s
+              lower(coalesce(a.action, '')) like %s
+              or lower(coalesce(a.detail, '')) like %s
+              or lower(coalesce(a.actor_email, '')) like %s
+              or lower(coalesce(a.actor_full_name, '')) like %s
+              or lower(coalesce(a.target_email, '')) like %s
+              or lower(coalesce(a.target_full_name, '')) like %s
               or lower(a.id) like %s
             )
             """
         )
-        params.extend([pattern, pattern, pattern, pattern, pattern])
-    if type_filter:
-        clauses.append("a.type = %s")
-        params.append(type_filter)
-    return ("where " + " and ".join(clauses), params) if clauses else ("", params)
-
-
-def _activity_payload(row: dict[str, Any]) -> dict[str, Any]:
-    user_name = row.get("full_name") or row.get("email") or row.get("external_auth_id") or "System"
-    detail_parts = [str(row.get("detail") or "event")]
-    meta = row.get("meta_json")
-    if isinstance(meta, dict):
-        for key in ("position", "target_position", "file_name", "duration_seconds"):
-            if meta.get(key) not in (None, ""):
-                detail_parts.append(f"{key}: {meta[key]}")
-                break
-    return {
-        "id": str(row["id"]),
-        "userId": row.get("user_id") or row.get("external_auth_id") or "system",
-        "userName": user_name,
-        "action": row.get("action") or row.get("event_name"),
-        "detail": " - ".join(detail_parts),
-        "timestamp": _iso(row.get("occurred_at")),
-        "ip": "n/a",
-        "type": row.get("type") or "System",
-        "avatarInitials": _initials(user_name, row.get("email") or ""),
-        "avatarColor": _avatar_color(str(row.get("user_id") or row.get("external_auth_id") or row["id"])),
-    }
+        params.extend([pattern, pattern, pattern, pattern, pattern, pattern, pattern])
+    return "where " + " and ".join(clauses), params
 
 
 def _tracked_user_filter(
@@ -2249,6 +2133,18 @@ def _money(value: Any) -> str:
         amount = Decimal("0")
     return str(amount.quantize(Decimal("0.000001")))
 
+
+def _usd_from_vnd(value: Any) -> str:
+    try:
+        amount_vnd = Decimal(str(value or 0))
+        exchange_rate = Decimal(BILLING_VND_PER_USD)
+        if exchange_rate <= 0:
+            raise ValueError("BILLING_VND_PER_USD must be positive")
+    except Exception:
+        logger.warning("Invalid BILLING_VND_PER_USD; using 25000")
+        exchange_rate = Decimal("25000")
+        amount_vnd = Decimal(str(value or 0))
+    return _money(amount_vnd / exchange_rate)
 
 def _date_key(value: Any) -> str:
     if isinstance(value, datetime):
