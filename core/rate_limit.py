@@ -21,13 +21,40 @@ from dataclasses import dataclass, field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from config import RATE_LIMIT_STORAGE_URI
+
 logger = logging.getLogger("viecareer")
+
+_redis_client = None
+
+
+async def _shared_increment(key: str, ttl_seconds: int) -> int | None:
+    """Increment a Redis counter when shared storage is configured."""
+    global _redis_client
+    if not RATE_LIMIT_STORAGE_URI or not RATE_LIMIT_STORAGE_URI.startswith(("redis://", "rediss://")):
+        return None
+    try:
+        if _redis_client is None:
+            from redis.asyncio import Redis
+
+            _redis_client = Redis.from_url(RATE_LIMIT_STORAGE_URI, decode_responses=True)
+        value = int(await _redis_client.incr(key))
+        if value == 1:
+            await _redis_client.expire(key, max(1, ttl_seconds))
+        return value
+    except Exception:
+        logger.warning("Shared rate-limit storage unavailable; using local counters", exc_info=True)
+        return None
 
 # ---------------------------------------------------------------------------
 # 1. IP Rate Limiter (slowapi) — shared singleton used by all routers
 # ---------------------------------------------------------------------------
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["120/minute"],
+    storage_uri=RATE_LIMIT_STORAGE_URI or "memory://",
+)
 """
 Default: 120 requests/min per IP across all routes.
 Tighter overrides are applied per-endpoint with @limiter.limit().
@@ -66,6 +93,25 @@ async def check_user_limit(user_id: str, max_requests: int = _USER_GENERAL_MAX) 
     if not user_id:
         return  # unauthenticated path — IP limiter handles it
 
+    epoch_window = int(time.time() // _USER_WINDOW_SEC)
+    shared_count = await _shared_increment(
+        f"viecareer:rate:user:{user_id}:{epoch_window}",
+        _USER_WINDOW_SEC + 2,
+    )
+    if shared_count is not None:
+        if shared_count > max_requests:
+            wait = int(_USER_WINDOW_SEC - (time.time() % _USER_WINDOW_SEC)) + 1
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "error": True,
+                    "code": "USER_RATE_LIMIT",
+                    "message": f"Too many requests. Please wait {wait}s before retrying.",
+                    "retry_after": wait,
+                },
+                headers={"Retry-After": str(wait)},
+            )
+        return
     async with _user_lock:
         bucket = _user_buckets[user_id]
         now = time.monotonic()
@@ -120,6 +166,23 @@ async def check_daily_quota() -> None:
     from fastapi import HTTPException, status
 
     today = time.strftime("%Y-%m-%d", time.gmtime())
+    shared_count = await _shared_increment(
+        f"viecareer:quota:ai:{today}",
+        26 * 60 * 60,
+    )
+    if shared_count is not None:
+        if shared_count > DAILY_AI_QUOTA:
+            logger.warning("Daily AI quota exhausted (%d/%d)", shared_count, DAILY_AI_QUOTA)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "error": True,
+                    "code": "DAILY_QUOTA_EXHAUSTED",
+                    "message": "Service daily capacity reached. Please try again tomorrow.",
+                    "retry": False,
+                },
+            )
+        return
     async with _daily_lock:
         if _daily_quota.date_str != today:
             _daily_quota.date_str = today

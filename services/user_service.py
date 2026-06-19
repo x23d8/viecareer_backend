@@ -251,12 +251,11 @@ def _get_user_by_auth_identity(
           privacy_policy_version
         from users
         where external_auth_id = %s
-          or (%s is not null and lower(email) = lower(%s))
         order by case when external_auth_id = %s then 0 else 1 end
         limit 1
         {lock_clause}
         """,
-        (external_auth_id, email, email, external_auth_id),
+        (external_auth_id, external_auth_id),
     )
     return cur.fetchone()
 

@@ -625,6 +625,11 @@ def _mark_locked_payment_status(
     provider_data: dict[str, Any],
     raw_payload: dict[str, Any],
 ) -> dict[str, Any]:
+    # A verified successful payment is terminal. Delayed, duplicated, or
+    # out-of-order failure/cancellation webhooks must never downgrade it.
+    if payment["status"] == PAYMENT_STATUS_PAID:
+        return _payment_payload(payment)
+
     timestamp_column = {
         PAYMENT_STATUS_CANCELLED: "cancelled_at",
         PAYMENT_STATUS_EXPIRED: "expired_at",
@@ -718,12 +723,11 @@ def _lookup_user(
         select id, external_auth_id, email, full_name
         from users
         where external_auth_id = %s
-          or (%s is not null and lower(email) = lower(%s))
         order by case when external_auth_id = %s then 0 else 1 end
         limit 1
         {lock_clause}
         """,
-        (external_auth_id, email, email, external_auth_id),
+        (external_auth_id, external_auth_id),
     )
     return cur.fetchone()
 

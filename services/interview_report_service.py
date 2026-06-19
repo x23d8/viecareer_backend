@@ -154,7 +154,7 @@ def save_interview_report(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database operation failed.") from exc
 
 
 def _ensure_interview_report_schema(cur) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, status
 
-from core.clerk_auth import ClerkUser, require_auth
+from core.clerk_auth import AdminUser, require_admin
 from core.rate_limit import limiter
 from services.db_crud_service import (
     TABLE_BY_NAME,
@@ -41,7 +41,7 @@ def _table_from_path(
 @limiter.limit("30/minute")
 def db_health(
     request: Request,
-    current_user: ClerkUser = Depends(require_auth),
+    current_user: AdminUser = Depends(require_admin),
 ):
     return check_database_connection()
 
@@ -50,7 +50,7 @@ def db_health(
 @limiter.limit("30/minute")
 def db_tables(
     request: Request,
-    current_user: ClerkUser = Depends(require_auth),
+    current_user: AdminUser = Depends(require_admin),
 ):
     return {"data": list_table_metadata()}
 
@@ -59,7 +59,7 @@ def db_tables(
 @limiter.limit("60/minute")
 def list_table_rows(
     request: Request,
-    current_user: ClerkUser = Depends(require_auth),
+    current_user: AdminUser = Depends(require_admin),
     table: TableMeta = Depends(_table_from_path),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -73,7 +73,7 @@ def list_table_rows(
 def get_table_row(
     request: Request,
     item_id: str,
-    current_user: ClerkUser = Depends(require_auth),
+    current_user: AdminUser = Depends(require_admin),
     table: TableMeta = Depends(_table_from_path),
 ):
     return get_row(table, item_id)
@@ -83,7 +83,7 @@ def get_table_row(
 @limiter.limit("30/minute")
 def create_table_row(
     request: Request,
-    current_user: ClerkUser = Depends(require_auth),
+    current_user: AdminUser = Depends(require_admin),
     payload: dict[str, Any] = Body(..., examples=[{"code": "starter", "name": "Starter"}]),
     table: TableMeta = Depends(_table_from_path),
 ):
@@ -95,7 +95,7 @@ def create_table_row(
 def update_table_row(
     request: Request,
     item_id: str,
-    current_user: ClerkUser = Depends(require_auth),
+    current_user: AdminUser = Depends(require_admin),
     payload: dict[str, Any] = Body(..., examples=[{"name": "Starter"}]),
     table: TableMeta = Depends(_table_from_path),
 ):
@@ -107,7 +107,7 @@ def update_table_row(
 def delete_table_row(
     request: Request,
     item_id: str,
-    current_user: ClerkUser = Depends(require_auth),
+    current_user: AdminUser = Depends(require_admin),
     table: TableMeta = Depends(_table_from_path),
 ):
     return delete_row(table, item_id)

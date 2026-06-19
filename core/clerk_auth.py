@@ -18,13 +18,15 @@ Configuration (backend/.env):
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import quote
 
+import httpx
 import jwt
 from fastapi import Depends, HTTPException, Query, Request, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
-from config import CLERK_ISSUER, CLERK_JWKS_URL
+from config import APP_ENV, CLERK_ISSUER, CLERK_JWKS_URL, CLERK_SECRET_KEY
 from core.database import get_connection
 
 logger = logging.getLogger("viecareer")
@@ -173,6 +175,47 @@ def _verify_token(token: str) -> ClerkUser:
         public_metadata=_extract_public_metadata(payload),
     )
 
+
+def verified_request_email(current_user: ClerkUser, requested_email: str) -> str:
+    """Resolve the email from verified Clerk data and reject body mismatches."""
+    requested = str(requested_email or "").strip().lower()
+    verified = str(current_user.email or "").strip().lower()
+
+    if not verified and CLERK_SECRET_KEY:
+        try:
+            response = httpx.get(
+                f"https://api.clerk.com/v1/users/{quote(current_user.user_id, safe='')}",
+                headers={"Authorization": f"Bearer {CLERK_SECRET_KEY}"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            primary_id = payload.get("primary_email_address_id")
+            for item in payload.get("email_addresses") or []:
+                if item.get("id") == primary_id:
+                    verified = str(item.get("email_address") or "").strip().lower()
+                    break
+        except Exception as exc:
+            logger.exception("Could not resolve Clerk primary email for user=%s", current_user.user_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not verify the authenticated email address.",
+            ) from exc
+
+    if not verified:
+        if APP_ENV == "production":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Clerk email verification is not configured.",
+            )
+        verified = requested
+
+    if requested != verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email does not match the authenticated Clerk identity.",
+        )
+    return verified
 
 # ---------------------------------------------------------------------------
 # FastAPI HTTP dependencies

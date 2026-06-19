@@ -1,5 +1,6 @@
 """Realtime voice endpoints."""
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, Request, WebSocket
@@ -37,7 +38,7 @@ async def get_realtime_token(
         metric=METRIC_SESSION_COUNT,
     )
     await check_daily_quota()
-    token = create_realtime_session()
+    token = await asyncio.to_thread(create_realtime_session)
     track_user_activity_async(
         "realtime_token_created",
         external_auth_id=current_user.user_id,
@@ -78,6 +79,10 @@ async def realtime_websocket(
         return
 
     try:
-        await relay_realtime_websocket(websocket, auth_external_id=current_user.user_id)
+        await relay_realtime_websocket(
+            websocket,
+            auth_external_id=current_user.user_id,
+            auth_email=current_user.email,
+        )
     finally:
         await release_ws_slot(client_ip)

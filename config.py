@@ -47,10 +47,13 @@ if not OPENAI_API_KEY:
 # Set in backend/.env:
 #   CLERK_JWKS_URL=https://clerk.viecareer.site/.well-known/jwks.json
 CLERK_JWKS_URL: str | None = os.getenv("CLERK_JWKS_URL")
+CLERK_SECRET_KEY: str | None = os.getenv("CLERK_SECRET_KEY")
 
 # Optional: strict issuer check. Set to your Clerk frontend API URL.
 # Leave blank to skip issuer verification (still verifies signature + expiry).
-CLERK_ISSUER: str | None = os.getenv("CLERK_ISSUER", "")
+CLERK_ISSUER: str | None = os.getenv("CLERK_ISSUER", "").strip() or (
+    CLERK_JWKS_URL.removesuffix("/.well-known/jwks.json") if CLERK_JWKS_URL else None
+)
 
 if not CLERK_JWKS_URL:
     print(
@@ -106,3 +109,6 @@ PAYOS_RETURN_URL: str = os.getenv("PAYOS_RETURN_URL", f"{FRONTEND_BASE_URL}/bill
 PAYOS_CANCEL_URL: str = os.getenv("PAYOS_CANCEL_URL", f"{FRONTEND_BASE_URL}/billing/cancel")
 BILLING_JOB_SECRET: str | None = os.getenv("BILLING_JOB_SECRET")
 BILLING_VND_PER_USD: str = os.getenv("BILLING_VND_PER_USD", "25000")
+
+# Optional shared backend for slowapi/limits. Example: redis://redis:6379/0
+RATE_LIMIT_STORAGE_URI: str | None = os.getenv("RATE_LIMIT_STORAGE_URI")

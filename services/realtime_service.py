@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from config import OPENAI_API_KEY, OPENAI_REALTIME_MODEL
 from core.api_usage import track_openai_usage_async, track_user_activity_async, usage_context
 from core.openai_client import get_openai_client
+from core.clerk_auth import ClerkUser, verified_request_email
 from core.prompts import load_prompt
 from schemas.interview_simulation import SelectNextQuestionRequest
 from schemas.realtime import RealtimeSessionMetadata
@@ -100,6 +101,7 @@ class _RelayState:
     started_at: float = field(default_factory=time.monotonic)
     session_started_at: float | None = None
     auth_external_id: str | None = None
+    auth_email: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str | None = None
     event_order: int = 0
@@ -123,7 +125,11 @@ class _RelayState:
         return max(0, int(time.monotonic() - base))
 
 
-async def relay_realtime_websocket(websocket: WebSocket, auth_external_id: str | None = None) -> None:
+async def relay_realtime_websocket(
+    websocket: WebSocket,
+    auth_external_id: str | None = None,
+    auth_email: str | None = None,
+) -> None:
     """Relay browser mic audio to OpenAI Realtime and stream model audio back."""
     await websocket.accept()
 
@@ -132,7 +138,7 @@ async def relay_realtime_websocket(websocket: WebSocket, auth_external_id: str |
         await websocket.close(code=1011)
         return
 
-    state = _RelayState(auth_external_id=auth_external_id)
+    state = _RelayState(auth_external_id=auth_external_id, auth_email=auth_email)
     model = quote(OPENAI_REALTIME_MODEL, safe="")
     openai_url = f"{_REALTIME_WEBSOCKET_URL}?model={model}"
 
@@ -203,6 +209,18 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                 await _send_client_error(websocket, "Realtime metadata user does not match the authenticated user")
                 await openai_ws.close(code=1008, reason="User mismatch")
                 return
+
+            if state.auth_external_id:
+                try:
+                    await asyncio.to_thread(
+                        verified_request_email,
+                        ClerkUser(user_id=state.auth_external_id, email=state.auth_email),
+                        str(validated.email),
+                    )
+                except HTTPException as exc:
+                    await _send_client_error(websocket, str(exc.detail), code="IDENTITY_MISMATCH")
+                    await openai_ws.close(code=1008, reason="Identity mismatch")
+                    return
 
             state.metadata = validated.model_dump(mode="json")
             state.blueprint = _coerce_blueprint(state.metadata.get("blueprint"))

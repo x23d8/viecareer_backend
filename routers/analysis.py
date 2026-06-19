@@ -1,11 +1,17 @@
 """Analysis endpoints — CV/JD extraction and interview scoring."""
 
+import asyncio
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from core.api_usage import track_blocked_ai_usage_async, track_user_activity_async, usage_context
-from core.clerk_auth import ClerkUser, require_auth
+from core.api_usage import (
+    track_blocked_ai_usage_async,
+    track_openai_usage_async,
+    track_user_activity_async,
+    usage_context,
+)
+from core.clerk_auth import ClerkUser, require_auth, verified_request_email
 from core.openai_client import get_openai_client
 from core.rate_limit import (
     ai_concurrency_limit,
@@ -73,8 +79,25 @@ async def extract_cvjd_route(
             },
         ) from exc
 
-    cached_reply = get_cached_cvjd_analysis(fingerprint.input_hash)
+    await check_user_limit_ai(current_user.user_id)
+    await check_plan_quota(
+        external_auth_id=current_user.user_id,
+        feature_code=FEATURE_CV_JD_ANALYSIS,
+        metric=METRIC_COUNT,
+    )
+
+    cached_reply = await asyncio.to_thread(get_cached_cvjd_analysis, fingerprint.input_hash)
     if cached_reply is not None:
+        track_openai_usage_async(
+            {
+                "model": "cache",
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+            usage,
+            model="cache",
+            meta={"cache_hit": True, "input_hash_prefix": fingerprint.input_hash[:12]},
+            cost_usd_override=0,
+        )
         track_user_activity_async(
             "cvjd_cache_hit",
             external_auth_id=current_user.user_id,
@@ -88,15 +111,11 @@ async def extract_cvjd_route(
         )
         return {"reply": cached_reply, "cached": True}
 
-    await check_user_limit_ai(current_user.user_id)
-    await check_plan_quota(
-        external_auth_id=current_user.user_id,
-        feature_code=FEATURE_CV_JD_ANALYSIS,
-        metric=METRIC_COUNT,
-    )
     await check_daily_quota()
+
     async with ai_concurrency_limit():
-        reply = extract_cvjd(
+        reply = await asyncio.to_thread(
+            extract_cvjd,
             client,
             req,
             usage_context=usage_context(
@@ -110,7 +129,8 @@ async def extract_cvjd_route(
                 },
             ),
         )
-        store_cvjd_analysis_cache(
+        await asyncio.to_thread(
+            store_cvjd_analysis_cache,
             fingerprint.input_hash,
             reply,
             meta={
@@ -140,10 +160,10 @@ async def save_cv_jd_analysis_route(
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Cannot save analysis for another user.")
     row = save_cv_jd_analysis(
         external_auth_id=req.external_auth_id,
-        email=str(req.email),
+        email=await asyncio.to_thread(verified_request_email, current_user, str(req.email)),
         account_full_name=req.account_full_name,
         avatar_url=req.avatar_url,
-        auth_provider=req.auth_provider,
+        auth_provider="clerk",
         analysis=req.analysis,
     )
     track_user_activity_async(
@@ -173,7 +193,8 @@ async def score_interview_route(
     await check_user_limit_score(current_user.user_id)
     async with ai_concurrency_limit():
         return {
-            "reply": score_interview(
+            "reply": await asyncio.to_thread(
+                score_interview,
                 client,
                 req,
                 usage_context=usage_context(
@@ -208,10 +229,10 @@ async def save_interview_report_route(
     await check_user_limit_score(current_user.user_id)
     row = save_interview_report(
         external_auth_id=req.external_auth_id,
-        email=str(req.email),
+        email=await asyncio.to_thread(verified_request_email, current_user, str(req.email)),
         account_full_name=req.account_full_name,
         avatar_url=req.avatar_url,
-        auth_provider=req.auth_provider,
+        auth_provider="clerk",
         cv_jd_analysis_id=req.cv_jd_analysis_id,
         live_session_id=req.live_session_id,
         position=req.position,

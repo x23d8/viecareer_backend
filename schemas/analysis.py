@@ -6,8 +6,8 @@ from pydantic import BaseModel, EmailStr, Field
 
 
 class ExtractCVJDRequest(BaseModel):
-    cv_text: str
-    jd_text: str
+    cv_text: str = Field(..., min_length=1, max_length=60_000)
+    jd_text: str = Field(..., min_length=1, max_length=50_000)
     external_auth_id: str | None = None  # Clerk user_id; used for user-level rate limiting
 
 
@@ -22,14 +22,14 @@ class SaveCVJDAnalysisRequest(BaseModel):
 
 class TranscriptEvent(BaseModel):
     role: Literal["user", "assistant", "system"]
-    text: str
+    text: str = Field(..., min_length=1, max_length=20_000)
     timestamp_sec: int | None = None
     source: str | None = "gpt-realtime"
 
 
 class ScoreInterviewRequest(BaseModel):
-    qa_pairs: List[dict]  # [{question, answer, timestamp}]
-    position: str
+    qa_pairs: List[dict] = Field(..., min_length=1, max_length=50)
+    position: str = Field(..., min_length=1, max_length=255)
     transcript_events: List[TranscriptEvent] = Field(default_factory=list)
     baseline_dimensions: dict[str, Any] | None = None
     cv_jd_analysis_id: str | None = None
@@ -44,7 +44,7 @@ class SaveInterviewReportRequest(BaseModel):
     auth_provider: str = "clerk"
     cv_jd_analysis_id: str | None = None
     live_session_id: str | None = None
-    position: str
+    position: str = Field(..., min_length=1, max_length=255)
     duration_seconds: int = 0
     overall_score: int = 0
     session_score: int = 0

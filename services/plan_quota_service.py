@@ -81,20 +81,12 @@ class QuotaDecision:
         }
 
 
-# _DEFAULT_PLANS: tuple[tuple[str, str, str, int, int, str, int], ...] = (
-#     ("free", "Free / Freemium", "0.00", 3, 20, "month", 1),
-#     ("standard", "Standard", "99000.00", 15, 50, "month", 1),
-#     ("pro", "Pro / Premium", "299000.00", 30, 50, "month", 1),
-#     ("team", "Team", "1199000.00", 30, 100, "month", 5),
-#     ("usage_based", "Usage-Based", "29000.00", 1, 20, "usage", 1),
-# )
-
 _DEFAULT_PLANS: tuple[tuple[str, str, str, int, int, str, int], ...] = (
     ("free", "Free / Freemium", "0.00", 3, 20, "month", 1),
-    ("standard", "Standard", "2000.00", 15, 50, "month", 1),
-    ("pro", "Pro / Premium", "3000.00", 30, 50, "month", 1),
-    ("team", "Team", "4000.00", 30, 100, "month", 5),
-    ("usage_based", "Usage-Based", "1000.00", 1, 20, "usage", 1),
+    ("standard", "Standard", "99000.00", 15, 50, "month", 1),
+    ("pro", "Pro / Premium", "299000.00", 30, 50, "month", 1),
+    ("team", "Team", "1199000.00", 30, 100, "month", 5),
+    ("usage_based", "Usage-Based", "29000.00", 1, 20, "usage", 1),
 )
 
 _DEFAULT_LIMITS: tuple[tuple[str, str, str, str, int | None], ...] = (
@@ -386,29 +378,13 @@ def _seed_plans(cur) -> None:
               included_members
             )
             values (%s, %s, %s, %s, %s, %s, %s)
-            on conflict (code) do update
-            set
-              name = excluded.name,
-              monthly_price = excluded.monthly_price,
-              quota_total = excluded.quota_total,
-              rate_limit_per_minute = excluded.rate_limit_per_minute,
-              billing_period = excluded.billing_period,
-              included_members = excluded.included_members
+            on conflict (code) do nothing
             """,
             (code, name, price, quota_total, rate_limit, billing_period, included_members),
         )
 
 
 def _seed_limits(cur) -> None:
-    cur.execute(
-        """
-        delete from plan_feature_limits l
-        using plans p
-        where p.id = l.plan_id
-          and p.code = any(%s)
-        """,
-        ([plan[0] for plan in _DEFAULT_PLANS],),
-    )
     for plan_code, feature_code, metric, period, limit_value in _DEFAULT_LIMITS:
         cur.execute(
             """
@@ -422,10 +398,7 @@ def _seed_limits(cur) -> None:
             select p.id, %s, %s, %s, %s
             from plans p
             where p.code = %s
-            on conflict (plan_id, feature_code, metric, period) do update
-            set
-              limit_value = excluded.limit_value,
-              updated_at = now()
+            on conflict (plan_id, feature_code, metric, period) do nothing
             """,
             (feature_code, metric, period, limit_value, plan_code),
         )

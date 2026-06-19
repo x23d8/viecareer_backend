@@ -1,5 +1,6 @@
 """Interview simulation endpoints independent from any frontend workflow."""
 
+import asyncio
 import time
 
 from fastapi import APIRouter, Depends, Request
@@ -50,7 +51,7 @@ async def generate_interview_blueprint(
                 },
             ),
         )
-        blueprint = service.generate_blueprint(req)
+        blueprint = await asyncio.to_thread(service.generate_blueprint, req)
         questions = blueprint.get("questions") if isinstance(blueprint, dict) else []
         track_user_activity_async(
             "action_plan_generated",
@@ -99,7 +100,7 @@ async def generate_coding_plan(
                 },
             ),
         )
-        coding_plan = service.generate_coding_plan(req)
+        coding_plan = await asyncio.to_thread(service.generate_coding_plan, req)
         challenges = coding_plan.get("challenges") if isinstance(coding_plan, dict) else []
         track_user_activity_async(
             "coding_plan_generated",
@@ -140,4 +141,4 @@ async def select_next_question(
                 },
             ),
         )
-        return {"data": service.select_next_question(req)}
+        return {"data": await asyncio.to_thread(service.select_next_question, req)}

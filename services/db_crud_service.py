@@ -448,7 +448,7 @@ def check_database_connection() -> dict[str, Any]:
                 )
                 row = cur.fetchone()
     except Exception as exc:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database operation failed.") from exc
 
     return {"connected": True, "target": database_target(), "server": row}
 
@@ -557,7 +557,7 @@ def _fetch_all(query: sql.Composable, params: tuple[Any, ...]) -> list[dict[str,
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database operation failed.") from exc
 
 
 def _fetch_one(query: sql.Composable, params: tuple[Any, ...]) -> dict[str, Any] | None:
@@ -571,4 +571,4 @@ def _fetch_one(query: sql.Composable, params: tuple[Any, ...]) -> dict[str, Any]
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database operation failed.") from exc

@@ -1,16 +1,15 @@
 """Request schemas for the chat endpoints."""
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
-    role: str  # "user" or "assistant"
-    content: str
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=20_000)
 
 
 class ChatRequest(BaseModel):
-    message: str
-    history: Optional[List[ChatMessage]] = None
-    user_id: Optional[str] = None  # Clerk user_id; used for user-level rate limiting
+    message: str = Field(..., min_length=1, max_length=20_000)
+    history: Optional[List[ChatMessage]] = Field(default=None, max_length=50)

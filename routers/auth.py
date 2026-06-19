@@ -8,11 +8,13 @@ The only backend auth concern is:
      and on profile updates (/api/auth/sync-user).
 """
 
+import asyncio
+
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from core.clerk_auth import ClerkUser, require_auth
+from core.clerk_auth import ClerkUser, require_auth, verified_request_email
 from core.rate_limit import limiter
 from schemas.auth import AcceptLegalPoliciesRequest, AuthSyncUserRequest
 from services.user_service import accept_legal_policies, get_legal_acceptance_status, upsert_auth_user
@@ -41,13 +43,16 @@ async def sync_user(
             detail="Token user_id does not match the request body.",
         )
 
-    full_name = (body.full_name or "").strip() or str(body.email).split("@")[0]
+    verified_email = await asyncio.to_thread(
+        verified_request_email, current_user, str(body.email)
+    )
+    full_name = (body.full_name or "").strip() or verified_email.split("@")[0]
     user = upsert_auth_user(
         external_auth_id=body.user_id,
-        email=str(body.email),
+        email=verified_email,
         full_name=full_name,
         avatar_url=body.avatar_url,
-        auth_provider=body.auth_provider,
+        auth_provider="clerk",
     )
     return {"data": user}
 

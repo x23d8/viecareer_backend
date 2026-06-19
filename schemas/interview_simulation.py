@@ -17,8 +17,8 @@ QuestionGroup = Literal[
 
 
 class InterviewContext(BaseModel):
-    cv_text: str = ""
-    jd_text: str = Field(..., min_length=1)
+    cv_text: str = Field(default="", max_length=60_000)
+    jd_text: str = Field(..., min_length=1, max_length=50_000)
     extracted_analysis: dict[str, Any] | None = None
 
 
@@ -42,9 +42,9 @@ class InterviewTurn(BaseModel):
 
 
 class SelectNextQuestionRequest(BaseModel):
-    blueprint: dict[str, Any]
-    transcript: list[InterviewTurn] = Field(default_factory=list)
-    answered_question_ids: list[str] = Field(default_factory=list)
-    covered_topics: list[str] = Field(default_factory=list)
+    blueprint: dict[str, Any] = Field(...)
+    transcript: list[InterviewTurn] = Field(default_factory=list, max_length=100)
+    answered_question_ids: list[str] = Field(default_factory=list, max_length=100)
+    covered_topics: list[str] = Field(default_factory=list, max_length=100)
     language: InterviewLanguage = "en"
     answered_count_by_group: dict[str, int] = Field(default_factory=dict)

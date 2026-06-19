@@ -1,5 +1,7 @@
 """Chat endpoints — generic assistant, VieBot, and AI interviewer."""
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Request
 
 from core.api_usage import usage_context
@@ -31,7 +33,8 @@ async def chat(
     await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():
-        reply = run_chat(
+        reply = await asyncio.to_thread(
+            run_chat,
             client,
             system_prompt="You are a helpful assistant.",
             message=req.message,
@@ -63,7 +66,8 @@ async def chat_viebot(
     )
     await check_daily_quota()
     async with ai_concurrency_limit():
-        reply = run_chat(
+        reply = await asyncio.to_thread(
+            run_chat,
             client,
             system_prompt=load_prompt("viebot"),
             message=req.message,
@@ -90,7 +94,8 @@ async def chat_interview(
     await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():
-        reply = run_chat(
+        reply = await asyncio.to_thread(
+            run_chat,
             client,
             system_prompt=load_prompt("interviewer"),
             message=req.message,
