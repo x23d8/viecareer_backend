@@ -65,7 +65,40 @@ class AdminAuthorizationTests(unittest.TestCase):
     def test_admin_endpoint_allows_admin_user(self):
         self.authenticate_as("user")
         self.set_db_user(1)
-        self.set_feature_metrics({"summary": {"total_events": 12}, "features": [], "trend": []})
+        active_patch = patch("routers.admin.ensure_tracking_tables")
+        active_patch.start()
+        self._patches.append(active_patch)
+        active_patch = patch("routers.admin.get_landing_metrics", return_value={
+            "summary": {
+                "landing_views": 0,
+                "pricing_clicks": 0,
+                "signup_clicks": 0,
+                "login_clicks": 0,
+                "unique_visitors": 0,
+            },
+            "by_source": [],
+            "trend": [],
+        })
+        active_patch.start()
+        self._patches.append(active_patch)
+        self.set_feature_metrics(
+            {
+                "window": {
+                    "date_from": "2026-06-01",
+                    "date_to": "2026-06-30",
+                    "group_by": "day",
+                    "days": 30,
+                },
+                "summary": {"total_events": 12},
+                "features": [],
+                "trend": [{"period": "2026-06-01", "action_plan": 1}],
+                "top_pages": [],
+                "dropoffs": {},
+            }
+        )
+        active_patch = patch("routers.admin.get_connection", return_value=FakeOverviewConnection())
+        active_patch.start()
+        self._patches.append(active_patch)
 
         response = self.client.get("/api/admin/overview")
 
@@ -75,7 +108,91 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(payload["current_admin"]["email"], "admin@example.com")
         self.assertEqual(payload["current_admin"]["full_name"], "Admin One")
         self.assertEqual(payload["current_admin"]["role_id"], 1)
-        self.assertEqual(payload["dashboard"], {"summary": {"total_events": 12}, "features": [], "trend": []})
+        self.assertEqual(payload["kpis"]["total_users"], 1)
+        self.assertEqual(payload["kpis"]["free_users"], 1)
+        self.assertEqual(payload["kpis"]["free_users_count"], 1)
+        self.assertEqual(payload["kpis"]["pro_users_count"], 0)
+        self.assertEqual(payload["kpis"]["paid_users"], 0)
+        self.assertEqual(payload["total_revenue_usd"], "10.000000")
+        self.assertEqual(payload["free_users_count"], 1)
+        self.assertEqual(payload["pro_users_count"], 0)
+        self.assertEqual(payload["kpis"]["total_revenue_usd"], "10.000000")
+        self.assertEqual(payload["charts"]["revenue"], [{"period": "2026-06-01", "revenue": "2.000000"}])
+        self.assertEqual(
+            payload["users_by_plan"],
+            [
+                {
+                    "plan_code": "free",
+                    "plan_name": "Free / Freemium",
+                    "users": 1,
+                    "is_paid": False,
+                    "monthly_revenue": "0.000000",
+                }
+            ],
+        )
+        self.assertEqual(payload["dashboard"]["summary"]["total_events"], 12)
+        self.assertEqual(payload["feature_metrics"]["summary"]["total_events"], 12)
+        self.assertEqual(payload["function_metrics"], [])
+        self.assertEqual(payload["charts"]["feature_trend"], [{"period": "2026-06-01", "action_plan": 1}])
+
+    def test_admin_routes_are_not_registered_twice(self):
+        route_keys = [
+            (path, tuple(sorted(route.methods or [])))
+            for route in self.client.app.routes
+            if (path := getattr(route, "path", "")).startswith("/api/admin")
+        ]
+        self.assertEqual(len(route_keys), len(set(route_keys)))
+
+    def test_legacy_activity_log_routes_are_removed(self):
+        self.assertEqual(self.client.get("/api/admin/activity/logs").status_code, 404)
+        self.assertEqual(self.client.get("/api/admin/activity/logs.csv").status_code, 404)
+
+    def test_admin_payments_maps_provider_status_and_revenue(self):
+        self.authenticate_as("user")
+        self.set_db_user(1)
+        active_patch = patch("routers.admin.get_connection", return_value=FakePaymentConnection())
+        active_patch.start()
+        self._patches.append(active_patch)
+
+        response = self.client.get("/api/admin/payments?status=success&search=admin%40example.com")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertEqual(payload["stats"]["total_revenue_vnd"], 250000)
+        self.assertEqual(payload["stats"]["total_revenue_usd"], "10.000000")
+        self.assertEqual(payload["items"][0]["status"], "success")
+        self.assertEqual(payload["items"][0]["transaction_code"], "20260619000001")
+
+    def test_admin_can_suspend_user(self):
+        self.authenticate_as("user")
+        self.set_db_user(1)
+        active_patch = patch("routers.admin._ensure_activity_logs_schema")
+        active_patch.start()
+        self._patches.append(active_patch)
+        connection = FakeUserStatusConnection()
+        active_patch = patch("routers.admin.get_connection", return_value=connection)
+        active_patch.start()
+        self._patches.append(active_patch)
+
+        response = self.client.patch(
+            "/api/admin/users/00000000-0000-0000-0000-000000000002/status",
+            json={"status": "suspended"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["status"], "suspended")
+        self.assertTrue(connection.committed)
+
+    def test_admin_user_status_rejects_unsupported_value(self):
+        self.authenticate_as("user")
+        self.set_db_user(1)
+
+        response = self.client.patch(
+            "/api/admin/users/00000000-0000-0000-0000-000000000002/status",
+            json={"status": "pending"},
+        )
+
+        self.assertEqual(response.status_code, 422)
 
     def test_admin_me_returns_current_admin_from_database(self):
         self.authenticate_as("user")
@@ -125,6 +242,8 @@ class FakeConnection:
 class FakeCursor:
     def __init__(self, role_id: int | None):
         self.role_id = role_id
+        self.last_query = ""
+        self.last_params = None
 
     def __enter__(self):
         return self
@@ -133,6 +252,8 @@ class FakeCursor:
         return False
 
     def execute(self, query, params):
+        self.last_query = " ".join(query.split()).lower()
+        self.last_params = params
         return None
 
     def fetchone(self):
@@ -143,6 +264,154 @@ class FakeCursor:
             "email": "admin@example.com",
             "full_name": "Admin One",
             "role_id": self.role_id,
+        }
+
+
+class FakeOverviewConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def cursor(self):
+        return FakeOverviewCursor()
+
+
+class FakeOverviewCursor:
+    def __init__(self):
+        self.fetchone_calls = 0
+        self.fetchall_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, query, params=None):
+        return None
+
+    def fetchone(self):
+        rows = [
+            {"total_users": 1, "free_users": 1, "pro_users": 0, "paid_users": 0},
+            {"cv_jd_analyses": 0},
+            {"completed_interviews": 0},
+            {"total_ai_cost_usd": 0, "ai_calls": 0},
+            {"total_revenue_vnd": 250000},
+        ]
+        row = rows[self.fetchone_calls]
+        self.fetchone_calls += 1
+        return row
+
+    def fetchall(self):
+        rows = [
+            [
+                {
+                    "plan_code": "free",
+                    "plan_name": "Free / Freemium",
+                    "users": 1,
+                    "is_paid": False,
+                    "monthly_revenue": 0,
+                }
+            ],
+            [],
+            [{"period": "2026-06-01", "revenue_vnd": 50000}],
+        ]
+        result = rows[self.fetchall_calls]
+        self.fetchall_calls += 1
+        return result
+
+
+class FakePaymentConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def cursor(self):
+        return FakePaymentCursor()
+
+
+class FakePaymentCursor:
+    def __init__(self):
+        self.fetchone_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, query, params=None):
+        return None
+
+    def fetchone(self):
+        self.fetchone_calls += 1
+        return {"total": 1, "success": 1, "pending": 0, "failed": 0, "total_revenue_vnd": 250000}
+
+    def fetchall(self):
+        return [
+            {
+                "id": 1,
+                "user_id": "00000000-0000-0000-0000-000000000002",
+                "email": "admin@example.com",
+                "full_name": "Admin Example",
+                "plan_id": 3,
+                "plan_code": "pro",
+                "plan_name": "Pro / Premium",
+                "provider": "payos",
+                "order_code": 20260619000001,
+                "payment_link_id": "link_1",
+                "amount_vnd": 250000,
+                "currency": "VND",
+                "status": "paid",
+                "description": "VC0000001",
+                "paid_at": None,
+                "created_at": None,
+                "updated_at": None,
+            }
+        ]
+
+
+class FakeUserStatusConnection:
+    def __init__(self):
+        self.committed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def cursor(self):
+        return FakeUserStatusCursor()
+
+    def commit(self):
+        self.committed = True
+
+
+class FakeUserStatusCursor:
+    def __init__(self):
+        self.execute_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, query, params=None):
+        self.execute_calls += 1
+
+    def fetchone(self):
+        return {
+            "id": "00000000-0000-0000-0000-000000000002",
+            "email": "user@example.com",
+            "full_name": "User Example",
+            "status": "suspended",
+            "updated_at": None,
         }
 
 

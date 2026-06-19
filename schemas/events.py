@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 LandingEventName = Literal["landing_view", "pricing_click", "signup_click", "login_click"]
@@ -20,6 +20,23 @@ class LandingEventRequest(BaseModel):
     path: str | None = Field(default=None, max_length=2048)
     target_path: str | None = Field(default=None, max_length=2048)
     pricing_plan_code: str | None = Field(default=None, max_length=50)
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def normalize_source(cls, value: object) -> str:
+        if value in (None, ""):
+            return "direct"
+
+        normalized = str(value).strip().lower()
+        if normalized in {"facebook", "fb"}:
+            return "facebook"
+        if normalized in {"tiktok", "tik_tok"}:
+            return "tiktok"
+        if normalized in {"google", "google_ads", "googleads"}:
+            return "google"
+        if normalized in {"direct", "web", "website"}:
+            return "direct"
+        return "other"
 
 
 class LandingMetricsQuery(BaseModel):

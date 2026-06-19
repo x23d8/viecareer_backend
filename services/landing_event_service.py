@@ -195,6 +195,23 @@ def get_landing_metrics(
                 cur.execute(
                     f"""
                     select
+                      pricing_plan_code as plan_code,
+                      count(*)::int as clicks,
+                      count(distinct visitor_id)::int as unique_visitors
+                    from landing_events
+                    where {where_sql}
+                      and event_name = 'pricing_click'
+                      and pricing_plan_code is not null
+                    group by pricing_plan_code
+                    order by clicks desc, pricing_plan_code asc
+                    """,
+                    params,
+                )
+                by_pricing_plan = [dict(row) for row in cur.fetchall()]
+
+                cur.execute(
+                    f"""
+                    select
                       date_trunc(%s, created_at)::date as period,
                       count(*) filter (where event_name = 'landing_view')::int as landing_views,
                       count(*) filter (where event_name = 'pricing_click')::int as pricing_clicks,
@@ -231,6 +248,7 @@ def get_landing_metrics(
             "unique_visitors": unique_by_event["landing_view"],
         },
         "by_source": by_source,
+        "by_pricing_plan": by_pricing_plan,
         "trend": trend,
         "integrations": {
             "google_analytics": {
@@ -241,7 +259,8 @@ def get_landing_metrics(
             },
             "custom_tracking": {
                 "status": "database_events_enabled",
-                "endpoint": "POST /api/events/landing",
+                "endpoint": "POST /api/analytics/events",
+                "legacy_endpoint": "POST /api/events/landing",
                 "table": "landing_events",
                 "tracked_fields": [
                     "visitor_id",

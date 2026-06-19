@@ -248,7 +248,8 @@ def require_admin(
 
     Admin access is decided by the users table, not by Clerk metadata or
     frontend state. In the current schema role_id=1 is the admin role.
-    Matches by external_auth_id first, with email as a fallback.
+    The authenticated Clerk subject must be explicitly linked to the row;
+    email fallback is intentionally forbidden.
     """
     try:
         with get_connection() as conn:
@@ -258,15 +259,10 @@ def require_admin(
                     select id, email, full_name, role_id
                     from users
                     where status = 'active'
-                      and (
-                        external_auth_id = %s
-                        or (%s is not null and lower(email) = lower(%s))
-                      )
-                    order by
-                      case when external_auth_id = %s then 0 else 1 end
+                      and external_auth_id = %s
                     limit 1
                     """,
-                    (current_user.user_id, current_user.email, current_user.email, current_user.user_id),
+                    (current_user.user_id,),
                 )
                 row = cur.fetchone()
     except Exception as exc:
