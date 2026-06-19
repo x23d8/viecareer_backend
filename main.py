@@ -9,7 +9,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from config import CORS_ORIGIN_REGEX, CORS_ORIGINS, ENABLE_DB_ADMIN_ROUTES
+from config import APP_ENV, CORS_ORIGIN_REGEX, CORS_ORIGINS, ENABLE_DB_ADMIN_ROUTES
 from core.exceptions import (
     http_exception_handler,
     unhandled_exception_handler,
@@ -21,7 +21,13 @@ from routers import admin, analysis, analytics, auth, billing, chat, database, e
 
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="VieCareer API")
+_production = APP_ENV == "production"
+app = FastAPI(
+    title="VieCareer API",
+    docs_url=None if _production else "/docs",
+    redoc_url=None if _production else "/redoc",
+    openapi_url=None if _production else "/openapi.json",
+)
 
 # ── Attach slowapi limiter state ────────────────────────────────────────────
 app.state.limiter = limiter

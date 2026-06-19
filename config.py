@@ -74,9 +74,14 @@ _raw_origins = os.getenv(
 CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 # Regex fallback — allows localhost during local dev without any env override.
+_default_cors_origin_regex = (
+    r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+    if APP_ENV in {"development", "dev", "test"}
+    else r"(?!)"
+)
 CORS_ORIGIN_REGEX = os.getenv(
     "CORS_ORIGIN_REGEX",
-    r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    _default_cors_origin_regex,
 )
 
 # ---------------------------------------------------------------------------
@@ -100,3 +105,4 @@ FRONTEND_BASE_URL: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")
 PAYOS_RETURN_URL: str = os.getenv("PAYOS_RETURN_URL", f"{FRONTEND_BASE_URL}/billing/return")
 PAYOS_CANCEL_URL: str = os.getenv("PAYOS_CANCEL_URL", f"{FRONTEND_BASE_URL}/billing/cancel")
 BILLING_JOB_SECRET: str | None = os.getenv("BILLING_JOB_SECRET")
+BILLING_VND_PER_USD: str = os.getenv("BILLING_VND_PER_USD", "25000")
