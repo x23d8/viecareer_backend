@@ -36,6 +36,11 @@ class AdminAuthorizationTests(unittest.TestCase):
         active_patch.start()
         self._patches.append(active_patch)
 
+    def set_feature_metrics(self, payload: dict):
+        active_patch = patch("routers.admin.get_feature_metrics_service", return_value=payload)
+        active_patch.start()
+        self._patches.append(active_patch)
+
     def test_extracts_role_from_public_metadata_claim(self):
         self.assertEqual(_extract_role({"public_metadata": {"role": "admin"}}), "admin")
         self.assertEqual(_extract_role({"publicMetadata": {"role": "Admin"}}), "admin")
@@ -60,6 +65,7 @@ class AdminAuthorizationTests(unittest.TestCase):
     def test_admin_endpoint_allows_admin_user(self):
         self.authenticate_as("user")
         self.set_db_user(1)
+        self.set_feature_metrics({"summary": {"total_events": 12}, "features": [], "trend": []})
 
         response = self.client.get("/api/admin/overview")
 
@@ -69,7 +75,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(payload["current_admin"]["email"], "admin@example.com")
         self.assertEqual(payload["current_admin"]["full_name"], "Admin One")
         self.assertEqual(payload["current_admin"]["role_id"], 1)
-        self.assertEqual(payload["dashboard"], {})
+        self.assertEqual(payload["dashboard"], {"summary": {"total_events": 12}, "features": [], "trend": []})
 
     def test_admin_me_returns_current_admin_from_database(self):
         self.authenticate_as("user")

@@ -16,11 +16,8 @@ from core.database import get_connection
 from core.rate_limit import limiter
 from schemas.events import LandingMetricGroupBy, LandingSource
 from services.admin_user_service import UserMetricGroupBy, get_admin_user_metrics, list_admin_users
-from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics
+from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics as get_feature_metrics_service
 from services.landing_event_service import ensure_landing_events_schema, get_landing_metrics
-
-router = APIRouter(prefix="/api/admin", tags=["admin"])
-logger = logging.getLogger("viecareer")
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger("viecareer")
@@ -87,6 +84,8 @@ case
   when event_name = 'file_parse' then 'upload_cv'
   when event_name in ('cvjd_saved', 'cvjd_cache_hit') then 'cv_jd_analysis'
   when event_name in ('interview_started', 'interview_completed', 'realtime_token_created') then 'realtime_interview'
+  when event_name = 'coding_plan_generated' then 'coding_interview'
+  when event_name = 'action_plan_generated' then 'action_plan'
   when event_name = 'report_saved' then 'feedback'
   else null
 end
@@ -96,6 +95,8 @@ ACTIVITY_COMPLETION_CASE = """
 case
   when event_name = 'cvjd_saved' then 'cv_jd_analysis'
   when event_name = 'interview_completed' then 'realtime_interview'
+  when event_name = 'coding_plan_generated' then 'coding_interview'
+  when event_name = 'action_plan_generated' then 'action_plan'
   when event_name = 'report_saved' then 'feedback'
   else null
 end
@@ -140,71 +141,24 @@ def get_current_admin(current_admin: AdminUser = Depends(require_admin)):
 
 
 @router.get("/overview")
-def get_admin_overview(current_admin: AdminUser = Depends(require_admin)):
-    return {
-        "data": {
-            "current_admin": _admin_payload(current_admin),
-            "dashboard": {},
-        }
-    }
-
-
-@router.get("/feature-metrics")
-def get_feature_metrics(
+def get_admin_overview(
     days: int = Query(30, ge=1, le=365),
     group_by: GroupBy = Query("day"),
     current_admin: AdminUser = Depends(require_admin),
 ):
-    del current_admin
     try:
-        ensure_tracking_tables()
-        ensure_landing_events_schema()
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                features = _empty_feature_map()
-                _merge_feature_counts(features, _fetch_activity_feature_counts(cur, days))
-                _merge_feature_counts(features, _fetch_landing_feature_counts(cur, days))
-                _merge_ai_counts(features, _fetch_ai_feature_counts(cur, days))
-                _merge_completion_counts(features, _fetch_completion_counts(cur, days))
-
-                trend = _fetch_feature_trend(cur, days, group_by)
-                top_pages = _fetch_top_pages(cur, days)
-                dropoff = _fetch_interview_dropoff(cur, days)
-                active_users = _fetch_feature_active_users(cur, days)
-                window = _window_payload(days, group_by)
+        dashboard = get_feature_metrics_service(days=days, group_by=group_by)
     except Exception as exc:
-        logger.exception("Could not load admin feature metrics")
+        logger.exception("Could not load admin overview")
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not load feature metrics.",
+            detail="Could not load admin overview.",
         ) from exc
-
-    feature_rows = [_feature_payload(key, values) for key, values in features.items()]
-    top_feature = max(feature_rows, key=lambda item: item["events"], default=None)
-    if top_feature and top_feature["events"] <= 0:
-        top_feature = None
-
-    cv_feature = features["cv_jd_analysis"]
-    summary = {
-        "total_events": sum(item["events"] for item in feature_rows),
-        "active_users": active_users,
-        "ai_calls": sum(item["ai_calls"] for item in feature_rows),
-        "total_cost_usd": _money(sum(Decimal(str(item["total_cost_usd"])) for item in feature_rows)),
-        "cv_uploads": features["upload_cv"]["events"],
-        "resume_reviews": max(cv_feature["completions"], cv_feature["ai_calls"]),
-        "completed_mock_interviews": dropoff["completed"],
-        "abandoned_interviews": dropoff["abandoned"],
-        "most_used_feature": top_feature,
-    }
 
     return {
         "data": {
-            "window": window,
-            "summary": summary,
-            "features": feature_rows,
-            "trend": trend,
-            "top_pages": top_pages,
-            "dropoffs": {"realtime_interview": dropoff},
+            "current_admin": _admin_payload(current_admin),
+            "dashboard": dashboard,
         }
     }
 
@@ -623,8 +577,9 @@ def get_admin_feature_metrics(
     group_by: FeatureGroupBy = Query(default="day"),
     current_admin: AdminUser = Depends(require_admin),
 ):
+    del request, current_admin
     try:
-        return {"data": get_feature_metrics(days=days, group_by=group_by)}
+        return {"data": get_feature_metrics_service(days=days, group_by=group_by)}
     except Exception as exc:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1353,7 +1308,8 @@ def _activity_base_query() -> str:
         u.email,
         u.full_name,
         case
-          when e.event_name in ('interview_started', 'interview_completed', 'realtime_token_created', 'report_saved') then 'Session'
+          when e.event_name in ('interview_started', 'interview_completed', 'realtime_token_created', 'report_saved', 'coding_plan_generated') then 'Session'
+          when e.event_name = 'action_plan_generated' then 'System'
           when e.event_name in ('file_parse', 'cvjd_saved', 'cvjd_cache_hit') then 'Account'
           else 'System'
         end as type,
@@ -1364,6 +1320,8 @@ def _activity_base_query() -> str:
           when e.event_name = 'realtime_token_created' then 'Created realtime token'
           when e.event_name = 'interview_started' then 'Started interview'
           when e.event_name = 'interview_completed' then 'Completed interview'
+          when e.event_name = 'coding_plan_generated' then 'Generated coding interview plan'
+          when e.event_name = 'action_plan_generated' then 'Generated action plan'
           when e.event_name = 'report_saved' then 'Saved interview report'
           else e.event_name
         end as action,
