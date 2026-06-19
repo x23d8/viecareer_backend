@@ -26,7 +26,7 @@ app = FastAPI(
     title="VieCareer API",
     docs_url=None if _production else "/docs",
     redoc_url=None if _production else "/redoc",
-    openapi_url=None if _production else "/openapi.json",
+    openapi_url=None if _production else "/api-docs/schema.json",
 )
 
 # ── Attach slowapi limiter state ────────────────────────────────────────────
