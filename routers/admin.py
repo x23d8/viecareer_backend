@@ -89,6 +89,8 @@ case
   when event_name = 'file_parse' then 'upload_cv'
   when event_name in ('cvjd_saved', 'cvjd_cache_hit') then 'cv_jd_analysis'
   when event_name in ('interview_started', 'interview_completed', 'realtime_token_created') then 'realtime_interview'
+  when event_name = 'coding_plan_generated' then 'coding_interview'
+  when event_name = 'action_plan_generated' then 'action_plan'
   when event_name = 'report_saved' then 'feedback'
   else null
 end
@@ -98,6 +100,8 @@ ACTIVITY_COMPLETION_CASE = """
 case
   when event_name = 'cvjd_saved' then 'cv_jd_analysis'
   when event_name = 'interview_completed' then 'realtime_interview'
+  when event_name = 'coding_plan_generated' then 'coding_interview'
+  when event_name = 'action_plan_generated' then 'action_plan'
   when event_name = 'report_saved' then 'feedback'
   else null
 end
@@ -380,9 +384,12 @@ def get_admin_overview(
             },
             "users_by_plan": users_by_plan,
             "landing_metrics": landing,
+            "dashboard": feature_metrics,
+            "feature_metrics": feature_metrics,
             "function_metrics": feature_metrics["features"],
             "charts": {
                 "landing_visits": landing["trend"],
+                "feature_trend": feature_metrics["trend"],
                 "ai_cost_by_day": ai_cost_by_day,
                 "revenue": revenue_trend,
             },
@@ -1976,7 +1983,8 @@ def _unified_activity_base_query() -> str:
         'user_event:' || e.id::text as id,
         e.occurred_at as created_at,
         case
-          when e.event_name in ('interview_started', 'interview_completed', 'realtime_token_created', 'report_saved') then 'session'
+          when e.event_name in ('interview_started', 'interview_completed', 'realtime_token_created', 'report_saved', 'coding_plan_generated') then 'session'
+          when e.event_name = 'action_plan_generated' then 'system'
           when e.event_name in ('file_parse', 'cvjd_saved', 'cvjd_cache_hit') then 'account'
           else 'system'
         end as log_type,
@@ -1987,6 +1995,8 @@ def _unified_activity_base_query() -> str:
           when e.event_name = 'realtime_token_created' then 'Created realtime token'
           when e.event_name = 'interview_started' then 'Started interview'
           when e.event_name = 'interview_completed' then 'Completed interview'
+          when e.event_name = 'coding_plan_generated' then 'Generated coding interview plan'
+          when e.event_name = 'action_plan_generated' then 'Generated action plan'
           when e.event_name = 'report_saved' then 'Saved interview report'
           else e.event_name
         end as action,

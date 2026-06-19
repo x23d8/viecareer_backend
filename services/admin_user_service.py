@@ -342,9 +342,11 @@ def _fetch_user_feature_totals(
           select
             case
               when feature = 'cvjd_extract' then 'cv_jd_analysis'
-              when feature in ('realtime_session', 'realtime_response', 'next_question', 'interview_blueprint', 'interview_score')
+              when feature in ('realtime_session', 'realtime_response', 'next_question')
                 then 'realtime_interview'
+              when feature = 'interview_score' then 'feedback'
               when feature = 'coding_plan' then 'coding_interview'
+              when feature = 'interview_blueprint' then 'action_plan'
               when feature in ('chat_viebot', 'chat_generic', 'chat_interview') then 'chatbot'
               else feature
             end as feature_key,
@@ -364,14 +366,26 @@ def _fetch_user_feature_totals(
             case
               when event_name in ('cvjd_saved') then 'cv_jd_analysis'
               when event_name in ('file_parse') then 'upload_cv'
-              when event_name in ('realtime_token_created', 'interview_started', 'interview_completed', 'report_saved')
+              when event_name in ('realtime_token_created', 'interview_started', 'interview_completed')
                 then 'realtime_interview'
-              when event_name in ('coding_feedback_generated', 'coding_feedback_saved') then 'feedback'
+              when event_name = 'coding_plan_generated' then 'coding_interview'
+              when event_name = 'action_plan_generated' then 'action_plan'
+              when event_name in ('report_saved', 'coding_feedback_generated', 'coding_feedback_saved') then 'feedback'
               else event_name
             end as feature_key,
             1 as event_count,
             0 as ai_call_count,
-            case when event_name in ('cvjd_saved', 'interview_completed', 'report_saved', 'coding_feedback_saved') then 1 else 0 end
+            case
+              when event_name in (
+                'cvjd_saved',
+                'interview_completed',
+                'report_saved',
+                'coding_plan_generated',
+                'action_plan_generated',
+                'coding_feedback_saved'
+              ) then 1
+              else 0
+            end
               as completion_count,
             0 as total_tokens,
             0::numeric as total_cost_usd
@@ -443,9 +457,11 @@ def _fetch_user_feature_trend(
             date_trunc(%s, occurred_at)::date as period,
             case
               when feature = 'cvjd_extract' then 'cv_jd_analysis'
-              when feature in ('realtime_session', 'realtime_response', 'next_question', 'interview_blueprint', 'interview_score')
+              when feature in ('realtime_session', 'realtime_response', 'next_question')
                 then 'realtime_interview'
+              when feature = 'interview_score' then 'feedback'
               when feature = 'coding_plan' then 'coding_interview'
+              when feature = 'interview_blueprint' then 'action_plan'
               when feature in ('chat_viebot', 'chat_generic', 'chat_interview') then 'chatbot'
               else feature
             end as feature_key,
@@ -462,9 +478,11 @@ def _fetch_user_feature_trend(
             case
               when event_name in ('cvjd_saved') then 'cv_jd_analysis'
               when event_name in ('file_parse') then 'upload_cv'
-              when event_name in ('realtime_token_created', 'interview_started', 'interview_completed', 'report_saved')
+              when event_name in ('realtime_token_created', 'interview_started', 'interview_completed')
                 then 'realtime_interview'
-              when event_name in ('coding_feedback_generated', 'coding_feedback_saved') then 'feedback'
+              when event_name = 'coding_plan_generated' then 'coding_interview'
+              when event_name = 'action_plan_generated' then 'action_plan'
+              when event_name in ('report_saved', 'coding_feedback_generated', 'coding_feedback_saved') then 'feedback'
               else event_name
             end as feature_key,
             1 as event_count

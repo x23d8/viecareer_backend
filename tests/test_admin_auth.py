@@ -36,6 +36,11 @@ class AdminAuthorizationTests(unittest.TestCase):
         active_patch.start()
         self._patches.append(active_patch)
 
+    def set_feature_metrics(self, payload: dict):
+        active_patch = patch("routers.admin.get_feature_metrics_service", return_value=payload)
+        active_patch.start()
+        self._patches.append(active_patch)
+
     def test_extracts_role_from_public_metadata_claim(self):
         self.assertEqual(_extract_role({"public_metadata": {"role": "admin"}}), "admin")
         self.assertEqual(_extract_role({"publicMetadata": {"role": "Admin"}}), "admin")
@@ -76,9 +81,21 @@ class AdminAuthorizationTests(unittest.TestCase):
         })
         active_patch.start()
         self._patches.append(active_patch)
-        active_patch = patch("routers.admin.get_feature_metrics_service", return_value={"features": []})
-        active_patch.start()
-        self._patches.append(active_patch)
+        self.set_feature_metrics(
+            {
+                "window": {
+                    "date_from": "2026-06-01",
+                    "date_to": "2026-06-30",
+                    "group_by": "day",
+                    "days": 30,
+                },
+                "summary": {"total_events": 12},
+                "features": [],
+                "trend": [{"period": "2026-06-01", "action_plan": 1}],
+                "top_pages": [],
+                "dropoffs": {},
+            }
+        )
         active_patch = patch("routers.admin.get_connection", return_value=FakeOverviewConnection())
         active_patch.start()
         self._patches.append(active_patch)
@@ -113,13 +130,16 @@ class AdminAuthorizationTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(payload["dashboard"]["summary"]["total_events"], 12)
+        self.assertEqual(payload["feature_metrics"]["summary"]["total_events"], 12)
         self.assertEqual(payload["function_metrics"], [])
+        self.assertEqual(payload["charts"]["feature_trend"], [{"period": "2026-06-01", "action_plan": 1}])
 
     def test_admin_routes_are_not_registered_twice(self):
         route_keys = [
-            (route.path, tuple(sorted(route.methods or [])))
+            (path, tuple(sorted(route.methods or [])))
             for route in self.client.app.routes
-            if route.path.startswith("/api/admin")
+            if (path := getattr(route, "path", "")).startswith("/api/admin")
         ]
         self.assertEqual(len(route_keys), len(set(route_keys)))
 
