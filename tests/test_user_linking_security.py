@@ -51,6 +51,30 @@ class UserLinkingSecurityTests(unittest.TestCase):
         self.assertEqual(result["role_id"], 2)
 
 
+    def test_verified_email_relinks_when_previous_clerk_user_is_deleted(self):
+        connection = FakeConnection(
+            linked_user=None,
+            email_owner={
+                "id": "00000000-0000-0000-0000-000000000004",
+                "external_auth_id": "user_deleted",
+                "email": "owner@example.com",
+            },
+        )
+
+        with (
+            patch("services.user_service.get_connection", return_value=connection),
+            patch("services.user_service._clerk_user_is_missing", return_value=True),
+        ):
+            result = upsert_auth_user(
+                external_auth_id="user_recreated",
+                email="owner@example.com",
+                full_name="Owner",
+                identity_verified=True,
+            )
+
+        self.assertEqual(result["external_auth_id"], "user_recreated")
+        self.assertEqual(result["role_id"], 2)
+        self.assertFalse(connection.cursor_instance.insert_attempted)
 class FakeConnection:
     def __init__(self, *, linked_user, email_owner):
         self.cursor_instance = FakeCursor(
@@ -107,7 +131,7 @@ class FakeCursor:
                 {
                     "id": params[-1],
                     "external_auth_id": params[0],
-                    "email": self.linked_user["email"],
+                    "email": (self.linked_user or self.email_owner)["email"],
                     "role_id": 2,
                 }
             )

@@ -53,6 +53,7 @@ async def sync_user(
         full_name=full_name,
         avatar_url=body.avatar_url,
         auth_provider="clerk",
+        identity_verified=True,
     )
     return {"data": user}
 

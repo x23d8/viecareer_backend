@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+from config import APP_ENV
 from core.database import get_connection
 
 logger = logging.getLogger("viecareer")
@@ -154,6 +155,9 @@ async def check_plan_quota(
 ) -> QuotaDecision:
     """Raise HTTP 429 when the authenticated user has exhausted plan quota."""
 
+    if APP_ENV in {"development", "dev"}:
+        return _unlimited_decision("development", "Development", feature_code, metric)
+
     return await asyncio.to_thread(
         _check_plan_quota_sync,
         external_auth_id=external_auth_id,
@@ -177,6 +181,11 @@ def get_plan_quota_summary_sync(*, external_auth_id: str) -> list[dict[str, Any]
 
     if not external_auth_id:
         return []
+    if APP_ENV in {"development", "dev"}:
+        return [
+            _unlimited_decision("development", "Development", feature, metric).payload()
+            for feature, metric in _QUOTA_SUMMARY_FEATURES
+        ]
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -197,6 +206,9 @@ def get_plan_quota_summary_sync(*, external_auth_id: str) -> list[dict[str, Any]
 
 async def get_realtime_session_limit_seconds(*, external_auth_id: str) -> int | None:
     """Return the current user's per-interview time limit in seconds."""
+
+    if APP_ENV in {"development", "dev"}:
+        return None
 
     minutes = await asyncio.to_thread(
         _get_limit_value_sync,
@@ -547,13 +559,22 @@ def _api_usage_count(
 
 
 def _realtime_session_count(cur, external_auth_id: str, window_start: datetime | None) -> int:
+    # Only persisted realtime sessions with at least one completed Q&A consume
+    # quota. Empty handshakes, Strict Mode reconnects, and abandoned setup
+    # attempts must not burn a user's monthly allowance.
     cur.execute(
         """
         select count(*)::int as used
         from interview_sessions s
         join users u on u.id = s.user_id
         where u.external_auth_id = %s
+          and s.context_json is not null
           and s.status in ('in_progress', 'completed')
+          and exists (
+            select 1
+            from interview_qa_pairs q
+            where q.session_id = s.id
+          )
           and (%s::timestamptz is null or s.created_at >= %s)
         """,
         (external_auth_id, window_start, window_start),

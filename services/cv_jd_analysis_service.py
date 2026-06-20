@@ -23,7 +23,8 @@ def save_cv_jd_analysis(
         email=email,
         full_name=account_full_name,
         avatar_url=avatar_url,
-        auth_provider=auth_provider,
+        auth_provider="clerk",
+        identity_verified=True,
     )
 
     ats_components = analysis.get("atsComponents") or {}

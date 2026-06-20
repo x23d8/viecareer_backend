@@ -2,11 +2,15 @@
 
 import logging
 from typing import Any
+from urllib.parse import quote
+
+import httpx
 
 logger = logging.getLogger("viecareer")
 
 from fastapi import HTTPException, status
 
+from config import CLERK_SECRET_KEY
 from core.database import get_connection
 
 LEGAL_TERMS_VERSION = "v4.0-2026-06-15"
@@ -20,6 +24,7 @@ def upsert_auth_user(
     full_name: str,
     avatar_url: str | None = None,
     auth_provider: str = "clerk",
+    identity_verified: bool = False,
 ) -> dict[str, Any]:
     try:
         with get_connection() as conn:
@@ -42,34 +47,20 @@ def upsert_auth_user(
                     cur.execute(
                         """
                         update users
-                        set
-                          external_auth_id = %s,
-                          auth_provider = %s,
-                          full_name = %s,
-                          avatar_url = %s,
-                          status = case
-                            when status = 'suspended' then status
-                            else 'active'
-                          end,
-                          last_active_at = now(),
-                          updated_at = now()
+                        set external_auth_id = %s,
+                            auth_provider = %s,
+                            full_name = %s,
+                            avatar_url = %s,
+                            status = case when status = 'suspended' then status else 'active' end,
+                            last_active_at = now(),
+                            updated_at = now()
                         where id = %s
                         returning *
                         """,
-                        (
-                            external_auth_id,
-                            auth_provider,
-                            full_name,
-                            avatar_url,
-                            linked_user["id"],
-                        ),
+                        (external_auth_id, auth_provider, full_name, avatar_url, linked_user["id"]),
                     )
                     row = cur.fetchone()
                 else:
-                    # Never claim an existing account by an email supplied by the
-                    # browser. Email-based linking allowed a newly authenticated
-                    # Clerk user to attach their external_auth_id to a privileged
-                    # legacy row while preserving that row's role_id.
                     cur.execute(
                         """
                         select id, external_auth_id
@@ -81,53 +72,87 @@ def upsert_auth_user(
                     )
                     email_owner = cur.fetchone()
                     if email_owner:
-                        raise HTTPException(
-                            status.HTTP_409_CONFLICT,
-                            detail=(
-                                "This email already belongs to an existing profile. "
-                                "Contact support to link the account safely."
-                            ),
+                        previous_external_id = str(email_owner.get("external_auth_id") or "").strip()
+                        can_relink = identity_verified and (
+                            not previous_external_id or _clerk_user_is_missing(previous_external_id)
                         )
+                        if not can_relink:
+                            raise HTTPException(
+                                status.HTTP_409_CONFLICT,
+                                detail=(
+                                    "This email already belongs to an existing profile. "
+                                    "Contact support to link the account safely."
+                                ),
+                            )
 
-                    cur.execute(
-                        """
-                        insert into users (
-                          external_auth_id,
-                          auth_provider,
-                          email,
-                          full_name,
-                          role_id,
-                          status,
-                          avatar_url,
-                          last_active_at,
-                          updated_at
-                        )
-                        values (%s, %s, %s, %s, %s, 'active', %s, now(), now())
-                        returning *
-                        """,
-                        (
+                        logger.info(
+                            "Relinking verified Clerk identity user=%s from=%s to=%s",
+                            email_owner["id"],
+                            previous_external_id or "unlinked",
                             external_auth_id,
-                            auth_provider,
-                            email,
-                            full_name,
-                            role_id,
-                            avatar_url,
-                        ),
-                    )
-                    row = cur.fetchone()
+                        )
+                        cur.execute(
+                            """
+                            update users
+                            set external_auth_id = %s,
+                                auth_provider = %s,
+                                full_name = %s,
+                                avatar_url = %s,
+                                status = case when status = 'suspended' then status else 'active' end,
+                                last_active_at = now(),
+                                updated_at = now()
+                            where id = %s
+                            returning *
+                            """,
+                            (external_auth_id, auth_provider, full_name, avatar_url, email_owner["id"]),
+                        )
+                        row = cur.fetchone()
+                    else:
+                        cur.execute(
+                            """
+                            insert into users (
+                              external_auth_id,
+                              auth_provider,
+                              email,
+                              full_name,
+                              role_id,
+                              status,
+                              avatar_url,
+                              last_active_at,
+                              updated_at
+                            )
+                            values (%s, %s, %s, %s, %s, 'active', %s, now(), now())
+                            returning *
+                            """,
+                            (external_auth_id, auth_provider, email, full_name, role_id, avatar_url),
+                        )
+                        row = cur.fetchone()
 
             conn.commit()
             return row
     except HTTPException:
         raise
     except Exception as exc:
-        # Log full details server-side; never expose DB internals to the client
         logger.exception("upsert_auth_user failed for external_auth_id=%s", external_auth_id)
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to sync user profile. Please try again.",
         ) from exc
 
+def _clerk_user_is_missing(external_auth_id: str) -> bool:
+    """Return true only when Clerk authoritatively reports that the old user is gone."""
+    if not CLERK_SECRET_KEY or not external_auth_id:
+        return False
+    try:
+        with httpx.Client(trust_env=False, timeout=10) as client:
+            response = client.get(
+                f"https://api.clerk.com/v1/users/{quote(external_auth_id, safe='')}",
+                headers={"Authorization": f"Bearer {CLERK_SECRET_KEY}"},
+            )
+        return response.status_code == 404
+    except Exception:
+        logger.warning("Could not verify previous Clerk identity=%s", external_auth_id, exc_info=True)
+        return False
 
 def get_legal_acceptance_status(
     *,

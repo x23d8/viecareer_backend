@@ -17,7 +17,13 @@ from main import app
 from routers import database
 from schemas.analysis import ExtractCVJDRequest
 from services.billing_service import PAYMENT_STATUS_PAID, _mark_locked_payment_status
-from services.plan_quota_service import _DEFAULT_PLANS
+from services.plan_quota_service import (
+    FEATURE_REALTIME_INTERVIEW,
+    METRIC_SESSION_COUNT,
+    _DEFAULT_PLANS,
+    check_plan_quota,
+    get_realtime_session_limit_seconds,
+)
 
 
 class BackendHardeningTests(unittest.TestCase):
@@ -79,6 +85,26 @@ class BackendHardeningTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["database"], "unavailable")
 
+class DevelopmentQuotaTests(unittest.IsolatedAsyncioTestCase):
+    async def test_development_bypasses_plan_and_realtime_duration_quotas(self):
+        with patch("services.plan_quota_service.APP_ENV", "development"):
+            decision = await check_plan_quota(
+                external_auth_id="user_dev",
+                feature_code=FEATURE_REALTIME_INTERVIEW,
+                metric=METRIC_SESSION_COUNT,
+            )
+            duration = await get_realtime_session_limit_seconds(external_auth_id="user_dev")
+
+        self.assertTrue(decision.allowed)
+        self.assertIsNone(decision.limit_value)
+        self.assertEqual(decision.plan_code, "development")
+        self.assertIsNone(duration)
+
+    async def test_development_bypasses_daily_ai_quota(self):
+        with patch("core.rate_limit.APP_ENV", "dev"):
+            from core.rate_limit import check_daily_quota
+
+            await check_daily_quota()
 
 if __name__ == "__main__":
     unittest.main()

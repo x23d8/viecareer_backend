@@ -175,13 +175,19 @@ def complete_live_interview_session(session_id: str | None, duration_seconds: in
         with conn.cursor() as cur:
             cur.execute(
                 """
-                update interview_sessions
+                update interview_sessions s
                 set
-                  status = 'completed',
+                  status = case
+                    when exists (
+                      select 1 from interview_qa_pairs q where q.session_id = s.id
+                    ) then 'completed'
+                    else 'cancelled'
+                  end,
                   ended_at = now(),
                   duration_seconds = coalesce(%s, duration_seconds),
                   updated_at = now()
-                where id = %s and status <> 'completed'
+                where s.id = %s
+                  and s.status not in ('completed', 'cancelled')
                 """,
                 (duration_seconds, session_id),
             )

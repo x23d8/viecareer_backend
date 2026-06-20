@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from config import RATE_LIMIT_STORAGE_URI
+from config import APP_ENV, RATE_LIMIT_STORAGE_URI
 
 logger = logging.getLogger("viecareer")
 
@@ -164,6 +164,9 @@ DAILY_AI_QUOTA = int(os.getenv("DAILY_AI_QUOTA", "2000"))  # adjust to your budg
 async def check_daily_quota() -> None:
     """Raise 429 if the backend-wide daily OpenAI call quota is exhausted."""
     from fastapi import HTTPException, status
+
+    if APP_ENV in {"development", "dev"}:
+        return
 
     today = time.strftime("%Y-%m-%d", time.gmtime())
     shared_count = await _shared_increment(

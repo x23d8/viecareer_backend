@@ -33,7 +33,8 @@ def save_interview_report(
         email=email,
         full_name=account_full_name,
         avatar_url=avatar_url,
-        auth_provider=auth_provider,
+        auth_provider="clerk",
+        identity_verified=True,
     )
 
     final = _normalize_dimensions(final_dimensions or interview_dimensions)
