@@ -253,8 +253,12 @@ create table if not exists interview_qa_pairs (
   question_order int not null,
   question text not null,
   answer text null,
+  raw_transcript text null,
+  polished_transcript text null,
   answer_timestamp_sec int null,
   score int null check (score between 0 and 100),
+  feedback text null,
+  score_json jsonb null,
   strengths_json jsonb null,
   weaknesses_json jsonb null,
   optimal_answer text null,
@@ -264,6 +268,25 @@ create table if not exists interview_qa_pairs (
 );
 
 alter table interview_qa_pairs add column if not exists transcript_events_json jsonb null;
+alter table interview_qa_pairs add column if not exists raw_transcript text null;
+alter table interview_qa_pairs add column if not exists polished_transcript text null;
+alter table interview_qa_pairs add column if not exists feedback text null;
+alter table interview_qa_pairs add column if not exists score_json jsonb null;
+
+create table if not exists coding_interview_submissions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  interview_session_id uuid null references interview_sessions(id) on delete set null,
+  cv_jd_analysis_id uuid null references cv_jd_analyses(id) on delete set null,
+  challenge_json jsonb not null default '{}'::jsonb,
+  language varchar(40) not null,
+  submitted_code text not null,
+  elapsed_seconds int null,
+  score int null check (score between 0 and 100),
+  summary text null,
+  feedback_json jsonb null,
+  created_at timestamptz not null default now()
+);
 
 create table if not exists interview_scores (
   id bigserial primary key,

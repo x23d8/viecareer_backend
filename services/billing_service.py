@@ -16,6 +16,11 @@ from fastapi import HTTPException, status
 from psycopg2.extras import Json
 
 from config import (
+    APP_ENV,
+    AUTH_MODE,
+    DEV_USER_EMAIL,
+    DEV_USER_ID,
+    DEV_USER_NAME,
     PAYOS_API_BASE,
     PAYOS_API_KEY,
     PAYOS_CANCEL_URL,
@@ -25,6 +30,7 @@ from config import (
 )
 from core.database import get_connection
 from services.plan_quota_service import ensure_plan_quota_schema, get_plan_quota_summary_sync
+from services.user_service import upsert_auth_user
 
 logger = logging.getLogger("viecareer")
 
@@ -288,6 +294,8 @@ def _ensure_billing_schema(cur) -> None:
 
 def _create_pending_payment(*, external_auth_id: str, email: str | None, plan_code: str) -> dict[str, Any]:
     ensure_billing_schema()
+    _ensure_dev_billing_user(external_auth_id=external_auth_id, email=email)
+
     with get_connection() as conn:
         with conn.cursor() as cur:
             _expire_due_subscriptions(cur)
@@ -340,6 +348,21 @@ def _create_pending_payment(*, external_auth_id: str, email: str | None, plan_co
     payload["buyer_email"] = user["email"]
     payload["buyer_name"] = user["full_name"]
     return payload
+
+
+def _ensure_dev_billing_user(*, external_auth_id: str, email: str | None) -> None:
+    if APP_ENV not in {"development", "dev", "test"} or AUTH_MODE != "dev":
+        return
+    if external_auth_id != DEV_USER_ID:
+        return
+
+    upsert_auth_user(
+        external_auth_id=DEV_USER_ID,
+        email=email or DEV_USER_EMAIL,
+        full_name=DEV_USER_NAME,
+        auth_provider="dev",
+        identity_verified=True,
+    )
 
 
 def _payos_create_payment_payload(payment: dict[str, Any]) -> dict[str, Any]:

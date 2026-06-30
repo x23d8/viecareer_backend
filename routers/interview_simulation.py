@@ -15,12 +15,20 @@ from core.rate_limit import (
     limiter,
 )
 from schemas.interview_simulation import (
+    EvaluateCodeInterviewRequest,
     GenerateCodingPlanRequest,
     GenerateInterviewBlueprintRequest,
     SelectNextQuestionRequest,
 )
+from services.interview_ai_service import evaluate_code_interview, save_code_interview_evaluation
 from services.interview_simulation_service import InterviewSimulationService
-from services.plan_quota_service import FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, check_plan_quota
+from services.plan_quota_service import (
+    FEATURE_AI_CODE_FEEDBACK,
+    FEATURE_CODING_PLAN,
+    METRIC_ATTEMPT_COUNT,
+    METRIC_GENERATION_COUNT,
+    check_plan_quota,
+)
 
 router = APIRouter(prefix="/interview-simulation", tags=["interview-simulation"])
 
@@ -142,3 +150,71 @@ async def select_next_question(
             ),
         )
         return {"data": await asyncio.to_thread(service.select_next_question, req)}
+
+
+@router.post("/code-evaluation")
+@limiter.limit("10/minute")
+async def evaluate_code_interview_route(
+    request: Request,
+    req: EvaluateCodeInterviewRequest,
+    current_user: ClerkUser = Depends(require_auth),
+    client=Depends(get_openai_client),
+):
+    """Evaluate submitted code with an LLM only; no sandbox execution is used."""
+    started_at = time.perf_counter()
+    await check_user_limit_ai(current_user.user_id)
+    await check_plan_quota(
+        external_auth_id=current_user.user_id,
+        feature_code=FEATURE_AI_CODE_FEEDBACK,
+        metric=METRIC_ATTEMPT_COUNT,
+    )
+    await check_daily_quota()
+    async with ai_concurrency_limit():
+        evaluation = await asyncio.to_thread(
+            evaluate_code_interview,
+            client,
+            challenge=req.challenge,
+            code=req.code,
+            language=req.language,
+            response_language=req.response_language,
+            usage_context=usage_context(
+                feature="coding_feedback",
+                external_auth_id=current_user.user_id,
+                related_type="interview_session" if req.live_session_id else None,
+                related_id=req.live_session_id,
+                meta={
+                    "endpoint": "/interview-simulation/code-evaluation",
+                    "language": req.language,
+                    "code_chars": len(req.code),
+                },
+            ),
+        )
+        email = current_user.email or f"{current_user.user_id}@clerk.local"
+        account_full_name = email or "Candidate"
+        saved = await asyncio.to_thread(
+            save_code_interview_evaluation,
+            external_auth_id=current_user.user_id,
+            email=email,
+            account_full_name=account_full_name,
+            challenge=req.challenge,
+            code=req.code,
+            language=req.language,
+            evaluation=evaluation,
+            avatar_url=None,
+            cv_jd_analysis_id=req.cv_jd_analysis_id,
+            live_session_id=req.live_session_id,
+            elapsed_seconds=req.elapsed_seconds,
+        )
+        track_user_activity_async(
+            "coding_feedback_saved",
+            external_auth_id=current_user.user_id,
+            object_type="coding_interview_submission",
+            object_id=str(saved.get("id") or ""),
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            meta={
+                "endpoint": "/interview-simulation/code-evaluation",
+                "score": evaluation.get("score"),
+                "language": req.language,
+            },
+        )
+        return {"data": {"id": str(saved.get("id") or ""), **evaluation}}

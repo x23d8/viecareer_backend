@@ -111,7 +111,16 @@ def score_interview(
 ) -> Optional[str]:
     """Score interview Q&A pairs across 5 dimensions and return detailed analysis."""
     qa_text = "\n\n".join(
-        f"Q{i + 1} [{qa.get('timestamp', '00:00')}]: {qa['question']}\nA{i + 1}: {qa['answer']}"
+        "\n".join(
+            part
+            for part in [
+                f"Q{i + 1} [{qa.get('timestamp', '00:00')}]: {qa['question']}",
+                f"A{i + 1}: {qa['answer']}",
+                f"Live answer score: {qa.get('score')}/100" if qa.get("score") is not None else "",
+                f"Live answer feedback: {qa.get('feedback')}" if qa.get("feedback") else "",
+            ]
+            if part
+        )
         for i, qa in enumerate(req.qa_pairs)
     )
     event_text = "\n".join(
@@ -119,7 +128,9 @@ def score_interview(
         for i, event in enumerate(req.transcript_events or [])
     )
 
+    response_language = "Vietnamese" if req.response_language == "vi" else "English"
     user_prompt = f"""Analyze these interview Q&A pairs for a "{req.position}" position and return a JSON object.
+Response language: {response_language}
 
 Interview Transcript:
 {qa_text}
@@ -166,6 +177,7 @@ Dimension rules:
 - D4 Initiative & Ownership: self-direction, follow-through, responsibility, learning behavior.
 - D5 Team Collaboration: teamwork, conflict handling, stakeholder awareness, process fit.
 - Use realtime events to preserve exact conversation order. Use Q&A pairs as a compact fallback.
+- If live answer scores/feedback are provided, use them as evidence, but still adjust final dimensions based on the full transcript quality.
 
 Return ONLY the JSON object."""
 

@@ -30,6 +30,7 @@ class TranscriptEvent(BaseModel):
 class ScoreInterviewRequest(BaseModel):
     qa_pairs: List[dict] = Field(..., min_length=1, max_length=50)
     position: str = Field(..., min_length=1, max_length=255)
+    response_language: Literal["vi", "en"] = "en"
     transcript_events: List[TranscriptEvent] = Field(default_factory=list)
     baseline_dimensions: dict[str, Any] | None = None
     cv_jd_analysis_id: str | None = None
@@ -53,3 +54,11 @@ class SaveInterviewReportRequest(BaseModel):
     interview_dimensions: dict[str, Any] = Field(default_factory=dict)
     final_dimensions: dict[str, Any] = Field(default_factory=dict)
     phase2_signals: List[dict[str, Any]] = Field(default_factory=list)
+    code_interview: dict[str, Any] | None = None
+
+
+class GenerateFinalReportRequest(BaseModel):
+    live_interview: dict[str, Any] = Field(default_factory=dict)
+    code_interview: dict[str, Any] | None = None
+    baseline_dimensions: dict[str, Any] | None = None
+    cv_jd_analysis_id: str | None = None

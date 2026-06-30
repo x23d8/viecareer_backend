@@ -1,6 +1,7 @@
 """OpenAI Realtime helpers for WebRTC tokens and the server-owned WebSocket relay."""
 
 import asyncio
+import base64
 import inspect
 import json
 import logging
@@ -18,7 +19,7 @@ import websockets
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from config import OPENAI_API_KEY, OPENAI_REALTIME_MODEL
+from config import OPENAI_API_KEY, OPENAI_ASR_MODEL, OPENAI_REALTIME_MODEL
 from core.api_usage import track_openai_usage_async, track_user_activity_async, usage_context
 from core.openai_client import get_openai_client
 from core.clerk_auth import ClerkUser, verified_request_email
@@ -26,6 +27,11 @@ from core.prompts import load_prompt
 from schemas.interview_simulation import SelectNextQuestionRequest
 from schemas.realtime import RealtimeSessionMetadata
 from services.interview_simulation_service import InterviewSimulationService
+from services.interview_ai_service import (
+    polish_transcript,
+    score_live_answer,
+    transcribe_push_to_talk_audio,
+)
 from services.plan_quota_service import (
     FEATURE_REALTIME_INTERVIEW,
     METRIC_SESSION_COUNT,
@@ -119,6 +125,9 @@ class _RelayState:
     realtime_usage_logged: bool = False
     realtime_estimate_logged: bool = False
     max_duration_seconds: int | None = None
+    ptt_language: str = "en"
+    ptt_audio_chunks: list[str] = field(default_factory=list)
+    ptt_mime_type: str = "audio/pcm;rate=24000"
 
     def timestamp_sec(self) -> int:
         base = self.session_started_at or self.started_at
@@ -300,7 +309,40 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
             await openai_ws.close()
             return
 
-        await openai_ws.send(json.dumps(event))
+        if event_type == "viecareer.ptt.start":
+            state.ptt_language = _normalize_interview_language(event.get("language") or state.metadata.get("language"))
+            state.ptt_mime_type = str(event.get("mime_type") or "audio/pcm;rate=24000")
+            state.ptt_audio_chunks = []
+            await _interrupt_realtime_playback(openai_ws, websocket)
+            await websocket.send_json(
+                {
+                    "type": "viecareer.ptt.recording_started",
+                    "language": state.ptt_language,
+                    "mime_type": state.ptt_mime_type,
+                }
+            )
+            continue
+
+        if event_type == "viecareer.ptt.audio":
+            chunk = str(event.get("audio") or "").strip()
+            if chunk:
+                state.ptt_audio_chunks.append(chunk)
+            continue
+
+        if event_type == "viecareer.ptt.commit":
+            await _process_push_to_talk_turn(websocket, openai_ws, state, event)
+            continue
+
+        if event_type == "viecareer.interrupt":
+            await _interrupt_realtime_playback(openai_ws, websocket)
+            continue
+
+        # [OLD - REALTIME] giu lai de tai su dung sau:
+        # Truoc day frontend forward truc tiep moi OpenAI Realtime event
+        # (input_audio_buffer.append/commit, response.create, socket event cu...)
+        # sang OpenAI. Luong nay tam thoi bi dung vi realtime interview dang
+        # khong on dinh; push-to-talk moi xu ly audio theo tung luot noi.
+        # await openai_ws.send(json.dumps(event))
 
 
 async def _openai_to_client(websocket: WebSocket, openai_ws, state: _RelayState) -> None:
@@ -308,6 +350,185 @@ async def _openai_to_client(websocket: WebSocket, openai_ws, state: _RelayState)
         message = raw_message.decode("utf-8") if isinstance(raw_message, bytes) else raw_message
         await websocket.send_text(message)
         await _persist_realtime_event(message, state, openai_ws)
+
+
+async def _interrupt_realtime_playback(openai_ws, websocket: WebSocket) -> None:
+    for event in (
+        {"type": "response.cancel"},
+        {"type": "input_audio_buffer.clear"},
+    ):
+        try:
+            await openai_ws.send(json.dumps(event))
+        except Exception:
+            logger.debug("Could not send realtime interrupt event", exc_info=True)
+    try:
+        await websocket.send_json({"type": "viecareer.playback.interrupted"})
+    except Exception:
+        logger.debug("Could not notify client about playback interruption", exc_info=True)
+
+
+async def _process_push_to_talk_turn(
+    websocket: WebSocket,
+    openai_ws,
+    state: _RelayState,
+    event: dict[str, Any],
+) -> None:
+    if not state.initialized:
+        await _send_client_error(websocket, "Push-to-talk session has not been initialized")
+        return
+
+    language = _normalize_interview_language(event.get("language") or state.ptt_language or state.metadata.get("language"))
+    mime_type = str(event.get("mime_type") or state.ptt_mime_type or "audio/pcm;rate=24000")
+    audio_base64 = _join_base64_audio_chunks(state.ptt_audio_chunks)
+    state.ptt_audio_chunks = []
+
+    await websocket.send_json(
+        {
+            "type": "viecareer.ptt.asr.processing",
+            "language": language,
+            "asr_model": OPENAI_ASR_MODEL,
+        }
+    )
+
+    try:
+        asr = await asyncio.to_thread(
+            transcribe_push_to_talk_audio,
+            audio_base64=audio_base64,
+            language=language,
+            mime_type=mime_type,
+        )
+    except HTTPException as exc:
+        await _send_client_error(websocket, _http_exception_message(exc), code="ASR_ERROR")
+        return
+
+    raw_transcript = str(asr.get("raw_transcript") or "").strip()
+    await websocket.send_json(
+        {
+            "type": "viecareer.ptt.asr.done",
+            "language": language,
+            "asr_model": asr.get("model"),
+            "raw_transcript": raw_transcript,
+        }
+    )
+
+    client = get_openai_client()
+    try:
+        polished = await asyncio.to_thread(
+            polish_transcript,
+            client,
+            raw_transcript=raw_transcript,
+            language=language,
+            usage_context=usage_context(
+                feature="asr_polish",
+                external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+                related_type="interview_session",
+                related_id=state.session_id,
+                meta={"question_order": state.question_order, "language": language},
+            ),
+        )
+    except HTTPException as exc:
+        await _send_client_error(websocket, _http_exception_message(exc), code="POLISH_ERROR")
+        return
+
+    await websocket.send_json(
+        {
+            "type": "viecareer.ptt.polish.done",
+            "raw_transcript": raw_transcript,
+            "polished_transcript": polished,
+        }
+    )
+
+    scoring = await _score_push_to_talk_answer(state, raw_transcript, polished, language)
+    if scoring:
+        await websocket.send_json(
+            {
+                "type": "viecareer.ptt.answer.scored",
+                "question_order": state.question_order,
+                "score": scoring.get("score"),
+                "feedback": scoring.get("feedback"),
+                "details": scoring,
+            }
+        )
+
+    transcript_event = _transcript_event(state, "user", polished)
+    transcript_event["raw_transcript"] = raw_transcript
+    transcript_event["polished_transcript"] = polished
+    state.transcript.append(
+        {
+            "role": "user",
+            "text": polished,
+            "raw_transcript": raw_transcript,
+            "question_id": state.pending_question_id,
+            "timestamp_sec": state.timestamp_sec(),
+        }
+    )
+    await asyncio.to_thread(_save_transcript_event_safe, state.session_id, transcript_event)
+
+    if state.pending_question:
+        if state.pending_question_id and state.pending_question_id not in state.answered_question_ids:
+            state.answered_question_ids.append(state.pending_question_id)
+        qa_events = [evt for evt in [state.pending_question_event, transcript_event] if evt]
+        await asyncio.to_thread(
+            _save_qa_pair_safe,
+            state.session_id,
+            state.question_order,
+            state.pending_question,
+            polished,
+            qa_events,
+            raw_transcript,
+            polished,
+            scoring,
+        )
+        state.pending_question = ""
+        state.pending_question_id = None
+        state.pending_question_event = None
+
+    await openai_ws.send(
+        json.dumps(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": polished}],
+                },
+            }
+        )
+    )
+    await _send_guided_interviewer_response(openai_ws, state)
+
+
+async def _score_push_to_talk_answer(
+    state: _RelayState,
+    raw_transcript: str,
+    polished_transcript: str,
+    language: str,
+) -> dict[str, Any] | None:
+    if not polished_transcript.strip() or not state.pending_question:
+        return None
+    try:
+        runtime_policy = (state.blueprint or {}).get("runtimePolicy") or {}
+        dimensions = runtime_policy.get("scoringDimensions") if isinstance(runtime_policy, dict) else []
+        return await asyncio.to_thread(
+            score_live_answer,
+            get_openai_client(),
+            question=state.pending_question,
+            raw_transcript=raw_transcript,
+            polished_transcript=polished_transcript,
+            language=language,
+            position=str(state.metadata.get("position") or ""),
+            scoring_dimensions=dimensions if isinstance(dimensions, list) else [],
+            usage_context=usage_context(
+                feature="live_answer_score",
+                external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+                related_type="interview_session",
+                related_id=state.session_id,
+                meta={"question_order": state.question_order, "language": language},
+            ),
+        )
+    except Exception:
+        logger.exception("Could not score push-to-talk answer")
+        return None
 
 
 async def _enforce_realtime_time_limit(websocket: WebSocket, openai_ws, state: _RelayState) -> None:
@@ -401,6 +622,11 @@ async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_w
         return
 
     if event_type == "conversation.item.input_audio_transcription.completed":
+        # [OLD - REALTIME] giu lai de tai su dung sau:
+        # Day la luong transcript cu tu audio streaming truc tiep cua
+        # gpt-realtime. Push-to-talk moi khong dua transcript tu event nay
+        # vao DB nua; thay vao do transcript di qua ASR rieng, GPT-4o polish,
+        # live scoring, roi moi tao conversation item bang text.
         text = str(event.get("transcript") or "").strip()
         if not text:
             return
@@ -930,6 +1156,9 @@ def _save_qa_pair_safe(
     question: str,
     answer: str,
     transcript_events: list[dict[str, Any]],
+    raw_transcript: str | None = None,
+    polished_transcript: str | None = None,
+    scoring: dict[str, Any] | None = None,
 ) -> None:
     try:
         save_realtime_qa_pair(
@@ -938,6 +1167,11 @@ def _save_qa_pair_safe(
             question=question,
             answer=answer,
             transcript_events=transcript_events,
+            raw_transcript=raw_transcript,
+            polished_transcript=polished_transcript,
+            score=scoring.get("score") if isinstance(scoring, dict) else None,
+            feedback=scoring.get("feedback") if isinstance(scoring, dict) else None,
+            score_details=scoring if isinstance(scoring, dict) else None,
         )
     except Exception:
         logger.exception("Could not save realtime Q&A pair")
@@ -995,3 +1229,22 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_interview_language(value: Any) -> str:
+    return "vi" if str(value or "").strip().lower().startswith("vi") else "en"
+
+
+def _join_base64_audio_chunks(chunks: list[str]) -> str:
+    raw = bytearray()
+    for chunk in chunks:
+        clean = str(chunk or "").strip()
+        if not clean:
+            continue
+        if clean.lower().startswith("data:") and "," in clean:
+            clean = clean.split(",", 1)[1]
+        try:
+            raw.extend(base64.b64decode(clean, validate=False))
+        except Exception:
+            logger.debug("Skipping invalid push-to-talk audio chunk", exc_info=True)
+    return base64.b64encode(bytes(raw)).decode("ascii") if raw else ""

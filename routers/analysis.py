@@ -5,6 +5,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from config import APP_ENV, AUTH_MODE
 from core.api_usage import (
     track_blocked_ai_usage_async,
     track_openai_usage_async,
@@ -22,10 +23,12 @@ from core.rate_limit import (
 )
 from schemas.analysis import (
     ExtractCVJDRequest,
+    GenerateFinalReportRequest,
     SaveCVJDAnalysisRequest,
     SaveInterviewReportRequest,
     ScoreInterviewRequest,
 )
+from services.interview_ai_service import combine_final_report
 from services.analysis_service import extract_cvjd, score_interview
 from services.cvjd_spam_guard import (
     CVJDSpamRejected,
@@ -154,13 +157,14 @@ async def save_cv_jd_analysis_route(
 ):
     """Persist an already-extracted CV/JD analysis for the authenticated user."""
     started_at = time.perf_counter()
+    dev_auth = APP_ENV in {"development", "dev", "test"} and AUTH_MODE == "dev"
     # Ensure users can only save their own analyses
-    if current_user.user_id != req.external_auth_id:
+    if not dev_auth and current_user.user_id != req.external_auth_id:
         from fastapi import HTTPException, status
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Cannot save analysis for another user.")
     row = save_cv_jd_analysis(
         external_auth_id=req.external_auth_id,
-        email=await asyncio.to_thread(verified_request_email, current_user, str(req.email)),
+        email=str(req.email) if dev_auth else await asyncio.to_thread(verified_request_email, current_user, str(req.email)),
         account_full_name=req.account_full_name,
         avatar_url=req.avatar_url,
         auth_provider="clerk",
@@ -222,14 +226,15 @@ async def save_interview_report_route(
 ):
     """Persist a completed interview report, including transcript events and final dimensions."""
     started_at = time.perf_counter()
+    dev_auth = APP_ENV in {"development", "dev", "test"} and AUTH_MODE == "dev"
     # Ensure users can only save their own reports
-    if current_user.user_id != req.external_auth_id:
+    if not dev_auth and current_user.user_id != req.external_auth_id:
         from fastapi import HTTPException, status
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Cannot save report for another user.")
     await check_user_limit_score(current_user.user_id)
     row = save_interview_report(
         external_auth_id=req.external_auth_id,
-        email=await asyncio.to_thread(verified_request_email, current_user, str(req.email)),
+        email=str(req.email) if dev_auth else await asyncio.to_thread(verified_request_email, current_user, str(req.email)),
         account_full_name=req.account_full_name,
         avatar_url=req.avatar_url,
         auth_provider="clerk",
@@ -244,6 +249,7 @@ async def save_interview_report_route(
         interview_dimensions=req.interview_dimensions,
         final_dimensions=req.final_dimensions,
         phase2_signals=req.phase2_signals,
+        code_interview=req.code_interview,
     )
     track_user_activity_async(
         "report_saved",
@@ -260,3 +266,36 @@ async def save_interview_report_route(
         },
     )
     return {"data": row}
+
+
+@router.post("/final-report")
+@limiter.limit("10/minute")
+async def generate_final_report_route(
+    request: Request,
+    req: GenerateFinalReportRequest,
+    current_user: ClerkUser = Depends(require_auth),
+    client=Depends(get_openai_client),
+):
+    """Generate a combined final report from live interview and code interview evidence."""
+    await check_daily_quota()
+    await check_user_limit_score(current_user.user_id)
+    async with ai_concurrency_limit():
+        return {
+            "data": await asyncio.to_thread(
+                combine_final_report,
+                client,
+                live_interview=req.live_interview,
+                code_interview=req.code_interview,
+                baseline_dimensions=req.baseline_dimensions,
+                usage_context=usage_context(
+                    feature="final_report",
+                    external_auth_id=current_user.user_id,
+                    related_type="cv_jd_analysis" if req.cv_jd_analysis_id else None,
+                    related_id=req.cv_jd_analysis_id,
+                    meta={
+                        "endpoint": "/final-report",
+                        "has_code_interview": bool(req.code_interview),
+                    },
+                ),
+            )
+        }

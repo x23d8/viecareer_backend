@@ -23,6 +23,7 @@ def save_interview_report(
     interview_dimensions: dict[str, Any],
     final_dimensions: dict[str, Any],
     phase2_signals: list[dict[str, Any]],
+    code_interview: dict[str, Any] | None = None,
     avatar_url: str | None = None,
     auth_provider: str = "clerk",
     cv_jd_analysis_id: str | None = None,
@@ -55,6 +56,7 @@ def save_interview_report(
                           ended_at = now(),
                           duration_seconds = %s,
                           overall_score = %s,
+                          context_json = coalesce(context_json, '{}'::jsonb) || %s::jsonb,
                           updated_at = now()
                         where id = %s and user_id = %s
                         returning *
@@ -64,6 +66,7 @@ def save_interview_report(
                             position,
                             max(0, int(duration_seconds or 0)),
                             _score(overall_score),
+                            Json({"code_interview": code_interview} if code_interview else {}),
                             live_session_id,
                             user["id"],
                         ),
@@ -79,11 +82,12 @@ def save_interview_report(
                           status,
                           started_at,
                           ended_at,
-                          duration_seconds,
-                          overall_score
-                        )
-                        values (%s, %s, %s, 'mixed', 'completed', now(), now(), %s, %s)
-                        returning *
+                        duration_seconds,
+                        overall_score,
+                        context_json
+                    )
+                    values (%s, %s, %s, 'mixed', 'completed', now(), now(), %s, %s, %s)
+                    returning *
                         """,
                         (
                             user["id"],
@@ -91,6 +95,7 @@ def save_interview_report(
                             position,
                             max(0, int(duration_seconds or 0)),
                             _score(overall_score),
+                            Json({"code_interview": code_interview} if code_interview else {}),
                         ),
                     )
                 session = cur.fetchone()
@@ -169,6 +174,10 @@ def _ensure_interview_report_schema(cur) -> None:
     cur.execute("alter table interview_sessions add column if not exists blueprint_json jsonb null")
     cur.execute("alter table interview_sessions add column if not exists context_json jsonb null")
     cur.execute("alter table interview_qa_pairs add column if not exists transcript_events_json jsonb null")
+    cur.execute("alter table interview_qa_pairs add column if not exists raw_transcript text null")
+    cur.execute("alter table interview_qa_pairs add column if not exists polished_transcript text null")
+    cur.execute("alter table interview_qa_pairs add column if not exists feedback text null")
+    cur.execute("alter table interview_qa_pairs add column if not exists score_json jsonb null")
     cur.execute("alter table interview_scores add column if not exists phase2_signals_json jsonb null")
     cur.execute("alter table interview_scores add column if not exists final_dimensions_json jsonb null")
     cur.execute(
@@ -224,13 +233,21 @@ def _insert_qa_pairs(cur, session_id: str, scored_qa: list[dict[str, Any]]) -> N
               question,
               answer,
               score,
+              raw_transcript,
+              polished_transcript,
+              feedback,
+              score_json,
               transcript_events_json
             )
-            values (%s, %s, %s, %s, %s, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             on conflict (session_id, question_order) do update set
               question = excluded.question,
               answer = excluded.answer,
               score = excluded.score,
+              raw_transcript = excluded.raw_transcript,
+              polished_transcript = excluded.polished_transcript,
+              feedback = excluded.feedback,
+              score_json = excluded.score_json,
               transcript_events_json = excluded.transcript_events_json
             """,
             (
@@ -239,6 +256,10 @@ def _insert_qa_pairs(cur, session_id: str, scored_qa: list[dict[str, Any]]) -> N
                 qa.get("question") or "",
                 qa.get("answer") or "",
                 _score(qa.get("score")),
+                qa.get("rawTranscript") or qa.get("raw_transcript"),
+                qa.get("polishedTranscript") or qa.get("polished_transcript") or qa.get("answer") or "",
+                qa.get("feedback") or "",
+                Json(qa.get("scoreDetails") or qa.get("score_json") or {}),
                 Json(qa.get("transcriptEvents") or []),
             ),
         )

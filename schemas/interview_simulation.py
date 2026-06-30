@@ -34,6 +34,16 @@ class GenerateCodingPlanRequest(InterviewContext):
     challenge_count: int = Field(default=1, ge=1, le=3)
 
 
+class EvaluateCodeInterviewRequest(BaseModel):
+    challenge: dict[str, Any] = Field(...)
+    code: str = Field(..., min_length=1, max_length=80_000)
+    language: str = Field(default="python", min_length=1, max_length=40)
+    response_language: InterviewLanguage = "en"
+    cv_jd_analysis_id: str | None = None
+    live_session_id: str | None = None
+    elapsed_seconds: int | None = Field(default=None, ge=0, le=24 * 60 * 60)
+
+
 class InterviewTurn(BaseModel):
     role: Literal["assistant", "user", "system"]
     text: str

@@ -92,6 +92,7 @@ def save_realtime_transcript_event(
     source: str = "gpt-realtime-ws",
     timestamp_sec: int | None = None,
     question_order: int | None = None,
+    **_extra: Any,
 ) -> None:
     clean = str(text or "").strip()
     if not clean:
@@ -133,6 +134,11 @@ def save_realtime_qa_pair(
     question: str,
     answer: str,
     transcript_events: list[dict[str, Any]],
+    raw_transcript: str | None = None,
+    polished_transcript: str | None = None,
+    score: int | None = None,
+    feedback: str | None = None,
+    score_details: dict[str, Any] | None = None,
 ) -> None:
     if not session_id:
         return
@@ -143,18 +149,36 @@ def save_realtime_qa_pair(
         with conn.cursor() as cur:
             _ensure_interview_report_schema(cur)
             cur.execute(
+                "alter table interview_qa_pairs add column if not exists raw_transcript text null"
+            )
+            cur.execute(
+                "alter table interview_qa_pairs add column if not exists polished_transcript text null"
+            )
+            cur.execute("alter table interview_qa_pairs add column if not exists feedback text null")
+            cur.execute("alter table interview_qa_pairs add column if not exists score_json jsonb null")
+            cur.execute(
                 """
                 insert into interview_qa_pairs (
                   session_id,
                   question_order,
                   question,
                   answer,
+                  raw_transcript,
+                  polished_transcript,
+                  score,
+                  feedback,
+                  score_json,
                   transcript_events_json
                 )
-                values (%s, %s, %s, %s, %s)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (session_id, question_order) do update set
                   question = excluded.question,
                   answer = excluded.answer,
+                  raw_transcript = excluded.raw_transcript,
+                  polished_transcript = excluded.polished_transcript,
+                  score = excluded.score,
+                  feedback = excluded.feedback,
+                  score_json = excluded.score_json,
                   transcript_events_json = excluded.transcript_events_json
                 """,
                 (
@@ -162,6 +186,11 @@ def save_realtime_qa_pair(
                     question_order,
                     str(question).strip(),
                     str(answer).strip(),
+                    str(raw_transcript or "").strip() or None,
+                    str(polished_transcript or answer).strip(),
+                    _score(score),
+                    str(feedback or "").strip() or None,
+                    Json(score_details or {}),
                     Json(transcript_events),
                 ),
             )
@@ -197,3 +226,12 @@ def complete_live_interview_session(session_id: str | None, duration_seconds: in
 def _role(value: str) -> str:
     role = str(value or "user").strip().lower()
     return role if role in {"user", "assistant", "system"} else "user"
+
+
+def _score(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return None

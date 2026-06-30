@@ -12,6 +12,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 APP_ENV: str = os.getenv("APP_ENV", "production").lower()
+AUTH_MODE: str = os.getenv("AUTH_MODE", "clerk").lower()
+DEV_USER_ID: str = os.getenv("DEV_USER_ID", "dev-local-user")
+DEV_USER_EMAIL: str = os.getenv("DEV_USER_EMAIL", "dev@local.test")
+DEV_USER_NAME: str = os.getenv("DEV_USER_NAME", "Development User")
 
 ENABLE_DB_ADMIN_ROUTES: bool = os.getenv("ENABLE_DB_ADMIN_ROUTES", "false").lower() in {
     "1",
@@ -26,6 +30,8 @@ ENABLE_DB_ADMIN_ROUTES: bool = os.getenv("ENABLE_DB_ADMIN_ROUTES", "false").lowe
 
 OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_ASR_MODEL: str = os.getenv("OPENAI_ASR_MODEL", "gpt-4o-mini-transcribe")
+OPENAI_POLISH_MODEL: str = os.getenv("OPENAI_POLISH_MODEL", "gpt-4o")
 OPENAI_REALTIME_MODEL: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
 
 # Fail fast — crash at startup rather than at the first AI request

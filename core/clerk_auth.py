@@ -26,7 +26,15 @@ from fastapi import Depends, HTTPException, Query, Request, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientError
 
-from config import APP_ENV, CLERK_ISSUER, CLERK_JWKS_URL, CLERK_SECRET_KEY
+from config import (
+    APP_ENV,
+    AUTH_MODE,
+    CLERK_ISSUER,
+    CLERK_JWKS_URL,
+    CLERK_SECRET_KEY,
+    DEV_USER_EMAIL,
+    DEV_USER_ID,
+)
 from core.database import get_connection
 
 logger = logging.getLogger("viecareer")
@@ -224,6 +232,22 @@ def verified_request_email(current_user: ClerkUser, requested_email: str) -> str
 _bearer = HTTPBearer(auto_error=False)
 
 
+def _dev_auth_base_enabled() -> bool:
+    return APP_ENV in {"development", "dev", "test"} and AUTH_MODE == "dev"
+
+
+def _dev_http_auth_enabled(request: Request) -> bool:
+    return _dev_auth_base_enabled() and request.headers.get("x-dev-auth") == "1"
+
+
+def _dev_ws_auth_enabled(token: str | None) -> bool:
+    return _dev_auth_base_enabled() and token == "dev"
+
+
+def _dev_user() -> ClerkUser:
+    return ClerkUser(user_id=DEV_USER_ID, email=DEV_USER_EMAIL, role="user", public_metadata={})
+
+
 def _request_context(request: Request | WebSocket) -> str:
     client_host = request.client.host if request.client else "unknown"
     origin = request.headers.get("origin", "-")
@@ -246,6 +270,9 @@ def require_auth(
         async def handler(user: ClerkUser = Depends(require_auth)):
             ...
     """
+    if _dev_http_auth_enabled(request):
+        return _dev_user()
+
     if not credentials or not credentials.credentials:
         logger.warning("Authentication missing Authorization bearer token: %s", _request_context(request))
         raise HTTPException(
@@ -273,6 +300,9 @@ def optional_auth(
         async def handler(user: ClerkUser | None = Depends(optional_auth)):
             ...
     """
+    if _dev_http_auth_enabled(request):
+        return _dev_user()
+
     if not credentials or not credentials.credentials:
         return None
     try:
@@ -353,6 +383,9 @@ async def verify_ws_token(
 
     Client connects to: ws://host/realtime/ws?token=<clerk_jwt>
     """
+    if _dev_ws_auth_enabled(token):
+        return _dev_user()
+
     if not token:
         logger.warning("WebSocket authentication missing token query parameter: %s", _request_context(websocket))
         raise HTTPException(
