@@ -77,6 +77,20 @@ class FeedbackApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
 
+    def test_submit_feedback_rejects_cost_fields(self):
+        response = self.client.post(
+            "/api/feedback",
+            json={
+                "session_id": "00000000-0000-0000-0000-000000000010",
+                "source": "report",
+                "emotion": "good",
+                "rating": 4,
+                "cost": 1,
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+
     def test_create_coding_session_returns_session_id(self):
         result = {
             "id": "coding-session-id",

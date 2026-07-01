@@ -9,3 +9,6 @@ htmlcov/
 .ruff_cache/
 docs/*
 !docs/feedback-api.md
+loadtests/
+scripts/seed_synthetic_demo_users.py
+scripts/synthetic_browser_journeys.py

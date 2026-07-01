@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 FeedbackEmotion = Literal["very_bad", "bad", "neutral", "good", "great"]
@@ -16,6 +16,8 @@ FeedbackTag = Literal[
 
 
 class SubmitFeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     session_id: UUID
     source: FeedbackSource
     emotion: FeedbackEmotion
@@ -38,6 +40,8 @@ class SubmitFeedbackRequest(BaseModel):
 
 
 class CreateCodingSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     position: str = Field(default="Coding practice", min_length=1, max_length=255)
     company: str | None = Field(default=None, max_length=255)
     duration_seconds: int | None = Field(default=None, ge=0, le=86400)
