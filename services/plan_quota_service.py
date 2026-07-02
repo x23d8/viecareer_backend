@@ -390,7 +390,14 @@ def _seed_plans(cur) -> None:
               included_members
             )
             values (%s, %s, %s, %s, %s, %s, %s)
-            on conflict (code) do nothing
+            on conflict (code) do update
+            set
+              name = excluded.name,
+              monthly_price = excluded.monthly_price,
+              quota_total = excluded.quota_total,
+              rate_limit_per_minute = excluded.rate_limit_per_minute,
+              billing_period = excluded.billing_period,
+              included_members = excluded.included_members
             """,
             (code, name, price, quota_total, rate_limit, billing_period, included_members),
         )

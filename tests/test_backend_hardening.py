@@ -21,6 +21,7 @@ from services.plan_quota_service import (
     FEATURE_REALTIME_INTERVIEW,
     METRIC_SESSION_COUNT,
     _DEFAULT_PLANS,
+    _seed_plans,
     check_plan_quota,
     get_realtime_session_limit_seconds,
 )
@@ -57,6 +58,17 @@ class BackendHardeningTests(unittest.TestCase):
         self.assertEqual(prices["pro"], "299000.00")
         self.assertEqual(prices["team"], "1199000.00")
         self.assertEqual(prices["usage_based"], "29000.00")
+
+    def test_plan_seed_repairs_existing_catalog_prices(self):
+        cursor = unittest.mock.Mock()
+
+        _seed_plans(cursor)
+
+        first_sql = " ".join(cursor.execute.call_args_list[0].args[0].split()).lower()
+        params = [call.args[1] for call in cursor.execute.call_args_list]
+        self.assertIn("on conflict (code) do update", first_sql)
+        self.assertIn("monthly_price = excluded.monthly_price", first_sql)
+        self.assertIn(("pro", "Pro / Premium", "299000.00", 30, 50, "month", 1), params)
 
     def test_paid_payment_cannot_be_downgraded(self):
         payment = {
