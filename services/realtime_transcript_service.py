@@ -29,6 +29,8 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
     job_description = str(metadata.get("job_description") or metadata.get("jd_summary") or "")
     language = str(metadata.get("language") or "en")
     voice = str(metadata.get("voice") or "shimmer")
+    voice_mode = str(metadata.get("voice_mode") or "realtime_conversation")
+    show_transcript = bool(metadata.get("show_transcript", True))
     blueprint = metadata.get("blueprint") if isinstance(metadata.get("blueprint"), dict) else metadata.get("interview_blueprint")
     blueprint = blueprint if isinstance(blueprint, dict) else {}
     interview_style = str(metadata.get("interview_style") or "mixed")
@@ -38,6 +40,8 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
         "job_description": job_description,
         "language": language,
         "voice": voice,
+        "voice_mode": voice_mode,
+        "show_transcript": show_transcript,
         "blueprint": blueprint,
         "interview_style": interview_style,
         "cv_jd_analysis_id": metadata.get("cv_jd_analysis_id"),
@@ -221,6 +225,55 @@ def complete_live_interview_session(session_id: str | None, duration_seconds: in
                 (duration_seconds, session_id),
             )
         conn.commit()
+
+
+def complete_live_interview_session_for_user(
+    session_id: str | None,
+    external_auth_id: str,
+    duration_seconds: int | None = None,
+) -> bool:
+    if not session_id or not external_auth_id:
+        return False
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                update interview_sessions s
+                set
+                  status = case
+                    when exists (
+                      select 1 from interview_qa_pairs q where q.session_id = s.id
+                    ) then 'completed'
+                    else 'cancelled'
+                  end,
+                  ended_at = now(),
+                  duration_seconds = coalesce(%s, duration_seconds),
+                  updated_at = now()
+                from users u
+                where s.id = %s
+                  and s.user_id = u.id
+                  and u.external_auth_id = %s
+                  and s.status not in ('completed', 'cancelled')
+                """,
+                (duration_seconds, session_id, external_auth_id),
+            )
+            updated = cur.rowcount > 0
+            if not updated:
+                cur.execute(
+                    """
+                    select 1
+                    from interview_sessions s
+                    join users u on u.id = s.user_id
+                    where s.id = %s
+                      and u.external_auth_id = %s
+                    limit 1
+                    """,
+                    (session_id, external_auth_id),
+                )
+                updated = cur.fetchone() is not None
+        conn.commit()
+    return updated
 
 
 def _role(value: str) -> str:

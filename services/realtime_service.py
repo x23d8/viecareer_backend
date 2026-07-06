@@ -19,7 +19,12 @@ import websockets
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from config import OPENAI_API_KEY, OPENAI_ASR_MODEL, OPENAI_REALTIME_MODEL
+from config import (
+    OPENAI_API_KEY,
+    OPENAI_ASR_MODEL,
+    OPENAI_REALTIME_CONNECT_URL,
+    OPENAI_REALTIME_MODEL,
+)
 from core.api_usage import track_openai_usage_async, track_user_activity_async, usage_context
 from core.openai_client import get_openai_client
 from core.clerk_auth import ClerkUser, verified_request_email
@@ -40,6 +45,7 @@ from services.plan_quota_service import (
 )
 from services.realtime_transcript_service import (
     complete_live_interview_session,
+    complete_live_interview_session_for_user,
     create_live_interview_session,
     save_realtime_qa_pair,
     save_realtime_transcript_event,
@@ -52,8 +58,16 @@ _REALTIME_WEBSOCKET_URL = "wss://api.openai.com/v1/realtime"
 _MAX_WS_MESSAGE_SIZE = 16 * 1024 * 1024
 
 
-def create_realtime_session() -> dict:
+def create_realtime_session(
+    metadata: dict[str, Any] | None = None,
+    blueprint: dict[str, Any] | None = None,
+) -> dict:
     """Create an ephemeral client secret for OpenAI Realtime WebRTC (GA API)."""
+    session_config = _realtime_session_config(
+        metadata,
+        blueprint,
+        create_response=str((metadata or {}).get("voice_mode") or "") != "push_to_talk",
+    )
     try:
         response = requests.post(
             _REALTIME_CLIENT_SECRETS_URL,
@@ -61,32 +75,7 @@ def create_realtime_session() -> dict:
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={
-                "session": {
-                    "type": "realtime",
-                    "model": OPENAI_REALTIME_MODEL,
-                    "instructions": load_prompt("realtime_interviewer"),
-                    "audio": {
-                        "input": {
-                            "format": {"type": "audio/pcm", "rate": 24000},
-                            "transcription": {
-                                "model": "whisper-1",
-                            },
-                            "turn_detection": {
-                                "type": "server_vad",
-                                "threshold": 0.5,
-                                "prefix_padding_ms": 300,
-                                "silence_duration_ms": 800,
-                                "create_response": False,
-                            },
-                        },
-                        "output": {
-                            "format": {"type": "audio/pcm", "rate": 24000},
-                            "voice": "shimmer",
-                        },
-                    }, 
-                },
-            },
+            json={"session": session_config},
             timeout=15,
         )
         response.raise_for_status()
@@ -100,6 +89,63 @@ def create_realtime_session() -> dict:
 
     data = response.json()
     return data.get("client_secret", data)
+
+
+def create_webrtc_start_payload(
+    *,
+    session_id: str,
+    metadata: dict[str, Any],
+    max_duration_seconds: int | None,
+) -> dict[str, Any]:
+    """Create the browser-facing payload for direct OpenAI Realtime WebRTC."""
+    blueprint = _coerce_blueprint(metadata.get("blueprint"))
+    client_secret_payload = create_realtime_session(metadata, blueprint)
+    client_secret = _client_secret_value(client_secret_payload)
+    if not client_secret:
+        logger.error("OpenAI realtime client secret response did not contain a bearer token")
+        raise HTTPException(status_code=502, detail="Could not create realtime client secret")
+
+    instructions = _realtime_session_config(
+        metadata,
+        blueprint,
+        create_response=str(metadata.get("voice_mode") or "") != "push_to_talk",
+    )["instructions"]
+    return {
+        "realtime_session_id": session_id,
+        "client_secret": client_secret,
+        "connect_url": OPENAI_REALTIME_CONNECT_URL,
+        "provider": "openai",
+        "model": OPENAI_REALTIME_MODEL,
+        "voice_mode": metadata.get("voice_mode", "realtime_conversation"),
+        "show_transcript": bool(metadata.get("show_transcript", True)),
+        "instructions": instructions,
+        "quota": {
+            "max_duration_seconds": max_duration_seconds,
+            "max_duration_minutes": _minutes_from_seconds(max_duration_seconds),
+        },
+    }
+
+
+def finalize_realtime_session(
+    *,
+    session_id: str,
+    duration_seconds: int | None,
+    external_auth_id: str | None = None,
+) -> None:
+    """Complete or cancel a WebRTC-created realtime interview session."""
+    if external_auth_id:
+        completed = complete_live_interview_session_for_user(session_id, external_auth_id, duration_seconds)
+        if not completed:
+            raise HTTPException(status_code=404, detail="Realtime session not found")
+    else:
+        _complete_live_session_safe(session_id, duration_seconds)
+    track_user_activity_async(
+        "interview_completed",
+        external_auth_id=external_auth_id,
+        object_type="interview_session",
+        object_id=session_id,
+        meta={"duration_seconds": duration_seconds, "transport": "webrtc"},
+    )
 
 
 @dataclass
@@ -439,16 +485,6 @@ async def _process_push_to_talk_turn(
     )
 
     scoring = await _score_push_to_talk_answer(state, raw_transcript, polished, language)
-    if scoring:
-        await websocket.send_json(
-            {
-                "type": "viecareer.ptt.answer.scored",
-                "question_order": state.question_order,
-                "score": scoring.get("score"),
-                "feedback": scoring.get("feedback"),
-                "details": scoring,
-            }
-        )
 
     transcript_event = _transcript_event(state, "user", polished)
     transcript_event["raw_transcript"] = raw_transcript
@@ -665,6 +701,18 @@ def _session_update_event(
     metadata: dict[str, Any] | None = None,
     blueprint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    return {
+        "type": "session.update",
+        "session": _realtime_session_config(metadata, blueprint, create_response=False),
+    }
+
+
+def _realtime_session_config(
+    metadata: dict[str, Any] | None = None,
+    blueprint: dict[str, Any] | None = None,
+    *,
+    create_response: bool,
+) -> dict[str, Any]:
     instructions = load_prompt("realtime_interviewer")
     job_description = str(
         (metadata or {}).get("job_description")
@@ -674,7 +722,7 @@ def _session_update_event(
     position = str((metadata or {}).get("position") or "").strip()
     language = str((metadata or {}).get("language") or "en").strip().lower()
     interview_style = str((metadata or {}).get("interview_style") or "mixed").strip()
-    blueprint_context = _blueprint_context(blueprint)
+    blueprint_context = _blueprint_context(blueprint, direct_conversation=create_response)
     language_directive = (
         "Conduct the entire interview in Vietnamese. Do not switch languages unless the candidate explicitly asks."
         if language == "vi"
@@ -704,30 +752,45 @@ def _session_update_event(
         )
 
     return {
-        "type": "session.update",
-        "session": {
-            "type": "realtime",
-            "instructions": instructions,
-            "audio": {
-                "input": {
-                    "format": {"type": "audio/pcm", "rate": 24000},
-                    "transcription": {"model": "whisper-1"},
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500,
-                        "create_response": False,
-                        "interrupt_response": True,
-                    },
+        "type": "realtime",
+        "model": OPENAI_REALTIME_MODEL,
+        "instructions": instructions,
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": {"model": "whisper-1"},
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500 if create_response else 800,
+                    "create_response": create_response,
+                    "interrupt_response": True,
                 },
-                "output": {
-                    "format": {"type": "audio/pcm", "rate": 24000},
-                    "voice": str((metadata or {}).get("voice", "shimmer")),
-                },
+            },
+            "output": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "voice": str((metadata or {}).get("voice", "shimmer")),
             },
         },
     }
+
+
+def _client_secret_value(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("value", "secret", "token"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = payload.get("client_secret")
+    if isinstance(nested, dict):
+        return _client_secret_value(nested)
+    if isinstance(nested, str):
+        return nested.strip()
+    return ""
 
 
 def _websocket_headers_kwargs(headers: dict[str, str]) -> dict[str, dict[str, str]]:
@@ -978,7 +1041,7 @@ def _coerce_blueprint(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def _blueprint_context(blueprint: dict[str, Any] | None) -> str:
+def _blueprint_context(blueprint: dict[str, Any] | None, *, direct_conversation: bool = False) -> str:
     if not blueprint:
         return ""
 
@@ -997,11 +1060,17 @@ def _blueprint_context(blueprint: dict[str, Any] | None) -> str:
         if isinstance(question, dict)
     ]
 
+    controller_policy = (
+        "You are directly managing the live interview. Ask one question at a time, track which question ids have been covered, and choose the next unasked question from the question bank after each candidate answer."
+        if direct_conversation
+        else "An adaptive controller will select the next question after each candidate answer. Do not invent a different main question when a selected question is provided."
+    )
+
     return "\n".join(
         [
             "Interview blueprint is available. Use it as the source of truth for interview scope.",
-            "An adaptive controller will select the next question after each candidate answer.",
-            "Do not invent a different main question when a selected question is provided.",
+            controller_policy,
+            "Do not reveal scoring, blueprint details, ids, topic labels, or selection logic.",
             f"Blueprint analysis: {json.dumps(analysis, ensure_ascii=False)}",
             f"Runtime policy: {json.dumps(runtime_policy, ensure_ascii=False)}",
             f"Question bank preview: {json.dumps(compact_questions, ensure_ascii=False)}",
