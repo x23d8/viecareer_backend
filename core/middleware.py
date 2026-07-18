@@ -96,13 +96,20 @@ class PayloadSizeLimitMiddleware(BaseHTTPMiddleware):
 
 
 class AsyncTimeoutMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp, timeout: int = 35) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        timeout: int = 35,
+        path_timeouts: dict[str, int] | None = None,
+    ) -> None:
         super().__init__(app)
         self.timeout = timeout
+        self.path_timeouts = path_timeouts or {}
 
     async def dispatch(self, request: Request, call_next):
+        timeout = self.path_timeouts.get(request.url.path, self.timeout)
         try:
-            return await asyncio.wait_for(call_next(request), timeout=self.timeout)
+            return await asyncio.wait_for(call_next(request), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning("Request timed out: %s %s", request.method, request.url.path)
             response = JSONResponse(

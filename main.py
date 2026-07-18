@@ -17,7 +17,7 @@ from core.exceptions import (
 )
 from core.middleware import AsyncTimeoutMiddleware, PayloadSizeLimitMiddleware
 from core.rate_limit import limiter
-from routers import admin, analysis, analytics, auth, billing, chat, database, events, feedback, files, health, interview_simulation, realtime
+from routers import admin, admin_jobs, analysis, analytics, auth, billing, chat, database, events, feedback, files, health, interview_simulation, jobs, realtime
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,7 +39,11 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(PayloadSizeLimitMiddleware)
 
 # Timeout — wraps everything so long-running AI calls are cut off
-app.add_middleware(AsyncTimeoutMiddleware, timeout=90)
+app.add_middleware(
+    AsyncTimeoutMiddleware,
+    timeout=90,
+    path_timeouts={"/api/admin/job-crawler/preview": 180},
+)
 
 # 1. IP rate limiter via slowapi
 app.add_middleware(SlowAPIMiddleware)
@@ -70,6 +74,7 @@ def ping():
 # ── Routers ─────────────────────────────────────────────────────────────────
 app.include_router(health.router)
 app.include_router(admin.router)
+app.include_router(admin_jobs.router)
 app.include_router(auth.router)
 app.include_router(billing.router)
 app.include_router(analytics.router)
@@ -78,6 +83,7 @@ app.include_router(feedback.router)
 app.include_router(files.router)
 app.include_router(chat.router)
 app.include_router(analysis.router)
+app.include_router(jobs.router)
 app.include_router(interview_simulation.router)
 app.include_router(realtime.router)
 

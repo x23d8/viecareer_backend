@@ -129,3 +129,42 @@ BILLING_VND_PER_USD: str = os.getenv("BILLING_VND_PER_USD", "25000")
 
 # Optional shared backend for slowapi/limits. Example: redis://redis:6379/0
 RATE_LIMIT_STORAGE_URI: str | None = os.getenv("RATE_LIMIT_STORAGE_URI")
+
+# ---------------------------------------------------------------------------
+# Authorized job-market ingestion
+# ---------------------------------------------------------------------------
+
+JOB_SYNC_SECRET: str | None = os.getenv("JOB_SYNC_SECRET")
+JOB_CRAWLER_USER_AGENT: str = os.getenv(
+    "JOB_CRAWLER_USER_AGENT",
+    "VieCareerJobIndexer/1.0 (+mailto:jobs@viecareer.site)",
+)
+JOB_SOURCE_REQUEST_DELAY_SECONDS: float = max(
+    0.5,
+    float(os.getenv("JOB_SOURCE_REQUEST_DELAY_SECONDS", "1.5")),
+)
+JOB_SOURCE_MAX_DETAILS: int = max(1, min(200, int(os.getenv("JOB_SOURCE_MAX_DETAILS", "30"))))
+
+
+def _job_source_enabled(source: str) -> bool:
+    return os.getenv(f"JOB_SOURCE_{source.upper()}_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _job_source_authorized(source: str) -> bool:
+    """Must only be enabled after the operator obtains written source permission."""
+    return os.getenv(f"JOB_SOURCE_{source.upper()}_AUTHORIZED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _job_source_listing_urls(source: str) -> list[str]:
+    raw = os.getenv(f"JOB_SOURCE_{source.upper()}_LISTING_URLS", "")
+    return [url.strip() for url in raw.split(",") if url.strip()]

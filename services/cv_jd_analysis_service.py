@@ -99,7 +99,7 @@ def save_cv_jd_analysis(
                 _insert_readiness_signals(cur, row["id"], normalized_signals)
 
             conn.commit()
-            return row
+            return _public_analysis_row(row)
     except Exception as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database operation failed.") from exc
 
@@ -112,6 +112,8 @@ def _ensure_cv_jd_analysis_columns(cur) -> None:
     cur.execute("alter table cv_jd_analyses add column if not exists d3_baseline int null")
     cur.execute("alter table cv_jd_analyses add column if not exists d4_baseline int null")
     cur.execute("alter table cv_jd_analyses add column if not exists d5_baseline int null")
+    cur.execute("alter table cv_jd_analyses add column if not exists is_synthetic boolean not null default false")
+    cur.execute("alter table cv_jd_analyses add column if not exists synthetic_seed varchar(100) null")
     cur.execute(
         """
         create table if not exists cv_jd_readiness_signals (
@@ -129,6 +131,14 @@ def _ensure_cv_jd_analysis_columns(cur) -> None:
         )
         """
     )
+
+
+def _public_analysis_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep internal synthetic markers out of API responses consumed by the UI."""
+    public_row = dict(row)
+    public_row.pop("is_synthetic", None)
+    public_row.pop("synthetic_seed", None)
+    return public_row
 
 
 def _insert_gap_items(cur, analysis_id: str, gap_analysis: list[dict[str, Any]]) -> None:
