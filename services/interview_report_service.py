@@ -27,6 +27,7 @@ def save_interview_report(
     avatar_url: str | None = None,
     auth_provider: str = "clerk",
     cv_jd_analysis_id: str | None = None,
+    job_id: str | None = None,
     live_session_id: str | None = None,
 ) -> dict[str, Any]:
     user = upsert_auth_user(
@@ -51,6 +52,7 @@ def save_interview_report(
                         update interview_sessions
                         set
                           cv_jd_analysis_id = coalesce(%s, cv_jd_analysis_id),
+                          job_id = coalesce(%s, job_id),
                           position = %s,
                           status = 'completed',
                           ended_at = now(),
@@ -63,6 +65,7 @@ def save_interview_report(
                         """,
                         (
                             cv_jd_analysis_id,
+                            job_id,
                             position,
                             max(0, int(duration_seconds or 0)),
                             _score(overall_score),
@@ -77,6 +80,7 @@ def save_interview_report(
                         insert into interview_sessions (
                           user_id,
                           cv_jd_analysis_id,
+                          job_id,
                           position,
                           session_type,
                           status,
@@ -86,12 +90,13 @@ def save_interview_report(
                         overall_score,
                         context_json
                     )
-                    values (%s, %s, %s, 'mixed', 'completed', now(), now(), %s, %s, %s)
+                    values (%s, %s, %s, %s, 'mixed', 'completed', now(), now(), %s, %s, %s)
                     returning *
                         """,
                         (
                             user["id"],
                             cv_jd_analysis_id,
+                            job_id,
                             position,
                             max(0, int(duration_seconds or 0)),
                             _score(overall_score),
@@ -164,6 +169,9 @@ def save_interview_report(
 
 
 def _ensure_interview_report_schema(cur) -> None:
+    cur.execute(
+        "alter table interview_sessions add column if not exists job_id uuid null references jobs(id) on delete set null"
+    )
     cur.execute(
         "alter table interview_sessions add column if not exists cv_jd_analysis_id uuid null references cv_jd_analyses(id) on delete set null"
     )

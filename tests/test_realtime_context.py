@@ -21,6 +21,7 @@ def valid_metadata() -> dict:
         "email": "candidate@example.com",
         "account_full_name": "Nguyen Van An",
         "auth_provider": "clerk",
+        "job_id": "11111111-1111-4111-8111-111111111111",
         "candidate": {
             "name": "Nguyen Van An",
             "profile": {"techStack": ["Python", "FastAPI"]},
@@ -160,14 +161,16 @@ class RealtimeSessionMetadataTests(unittest.TestCase):
         params = insert_call[1]
 
         self.assertEqual(session_id, "session-123")
-        self.assertEqual(params[2], "Backend Engineer")
-        self.assertEqual(params[4].adapted["name"], "Nguyen Van An")
-        self.assertEqual(params[5], "Build reliable FastAPI services.")
-        self.assertEqual(params[6:8], ("vi", "shimmer"))
-        self.assertEqual(params[8].adapted["questions"][0]["id"], "q1")
-        self.assertEqual(params[9].adapted["position"], "Backend Engineer")
-        self.assertNotIn("email", params[9].adapted)
-        self.assertNotIn("external_auth_id", params[9].adapted)
+        self.assertEqual(params[2], "11111111-1111-4111-8111-111111111111")
+        self.assertEqual(params[3], "Backend Engineer")
+        self.assertEqual(params[5].adapted["name"], "Nguyen Van An")
+        self.assertEqual(params[6], "Build reliable FastAPI services.")
+        self.assertEqual(params[7:9], ("vi", "shimmer"))
+        self.assertEqual(params[9].adapted["questions"][0]["id"], "q1")
+        self.assertEqual(params[10].adapted["position"], "Backend Engineer")
+        self.assertEqual(params[10].adapted["job_id"], "11111111-1111-4111-8111-111111111111")
+        self.assertNotIn("email", params[10].adapted)
+        self.assertNotIn("external_auth_id", params[10].adapted)
         self.assertTrue(connection.committed)
 
     def test_final_report_updates_the_live_session_instead_of_creating_another(self):

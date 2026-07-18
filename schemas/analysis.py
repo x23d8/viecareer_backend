@@ -1,6 +1,7 @@
 """Request schemas for the CV/JD extraction and interview scoring endpoints."""
 
 from typing import Any, List, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -17,6 +18,7 @@ class SaveCVJDAnalysisRequest(BaseModel):
     account_full_name: str
     avatar_url: str | None = None
     auth_provider: str = "clerk"
+    job_id: UUID | None = None
     analysis: dict[str, Any]
 
 
@@ -44,6 +46,7 @@ class SaveInterviewReportRequest(BaseModel):
     avatar_url: str | None = None
     auth_provider: str = "clerk"
     cv_jd_analysis_id: str | None = None
+    job_id: UUID | None = None
     live_session_id: str | None = None
     position: str = Field(..., min_length=1, max_length=255)
     duration_seconds: int = 0

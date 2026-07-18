@@ -1,6 +1,7 @@
 """Contracts for realtime interview session context."""
 
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -37,6 +38,7 @@ class RealtimeSessionMetadata(BaseModel):
     avatar_url: str | None = None
     auth_provider: str = Field(default="clerk", min_length=1, max_length=50)
     cv_jd_analysis_id: str | None = None
+    job_id: UUID | None = None
 
     candidate: RealtimeCandidate
     position: str = Field(..., min_length=1, max_length=255)

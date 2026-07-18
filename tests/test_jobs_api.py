@@ -22,7 +22,10 @@ from services.job_ingestion_service import (  # noqa: E402
     build_keyword_listing_url,
     preview_source_jobs,
 )
-from services.job_market_service import _load_interaction_states  # noqa: E402
+from services.job_market_service import (  # noqa: E402
+    _load_interaction_states,
+    get_job_practice_context,
+)
 
 
 class JobsApiTests(unittest.TestCase):
@@ -90,6 +93,46 @@ class JobsApiTests(unittest.TestCase):
             context="recommendation",
             source="itviec",
         )
+
+    def test_practice_context_uses_authenticated_user(self):
+        app.dependency_overrides[require_auth] = lambda: ClerkUser(user_id="user_jobs_123")
+        result = {
+            "job_id": "job-1",
+            "title": "Backend Engineer",
+            "company_name": "Acme",
+            "job_description": "Build reliable services. " * 10,
+        }
+        with patch("routers.jobs.get_job_practice_context", return_value=result) as mocked:
+            response = self.client.get("/api/jobs/job-1/practice-context")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"], result)
+        mocked.assert_called_once_with(job_id="job-1", external_auth_id="user_jobs_123")
+
+    def test_practice_context_normalizes_the_authoritative_job(self):
+        description = "  Build reliable FastAPI services.  \n\n Work with PostgreSQL.  " * 4
+        with patch(
+            "services.job_market_service.get_job",
+            return_value={
+                "id": "job-1",
+                "title": "Backend Engineer",
+                "company_name": "Acme",
+                "description": description,
+                "location": "Ho Chi Minh City",
+                "experience_level": "middle",
+                "skills": ["Python", "PostgreSQL"],
+                "primary_source": "itviec",
+                "sources": [{"source": "itviec", "source_url": "https://itviec.com/job-1"}],
+                "last_seen_at": "2026-07-18T00:00:00Z",
+            },
+        ) as mocked:
+            result = get_job_practice_context(job_id="job-1", external_auth_id="user_jobs_123")
+
+        self.assertEqual(result["job_id"], "job-1")
+        self.assertEqual(result["source"], "itviec")
+        self.assertEqual(result["source_url"], "https://itviec.com/job-1")
+        self.assertNotIn("\n\n", result["job_description"])
+        mocked.assert_called_once_with(job_id="job-1", external_auth_id="user_jobs_123")
 
     def test_sync_requires_configured_secret(self):
         with patch("routers.jobs.JOB_SYNC_SECRET", None):

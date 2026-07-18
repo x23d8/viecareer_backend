@@ -168,6 +168,7 @@ async def save_cv_jd_analysis_route(
         account_full_name=req.account_full_name,
         avatar_url=req.avatar_url,
         auth_provider="clerk",
+        job_id=str(req.job_id) if req.job_id else None,
         analysis=req.analysis,
     )
     track_user_activity_async(
@@ -179,6 +180,7 @@ async def save_cv_jd_analysis_route(
         meta={
             "target_position": req.analysis.get("targetPosition"),
             "ats_score": req.analysis.get("atsScore"),
+            "job_id": str(req.job_id) if req.job_id else None,
         },
     )
     return {"data": row}
@@ -239,6 +241,7 @@ async def save_interview_report_route(
         avatar_url=req.avatar_url,
         auth_provider="clerk",
         cv_jd_analysis_id=req.cv_jd_analysis_id,
+        job_id=str(req.job_id) if req.job_id else None,
         live_session_id=req.live_session_id,
         position=req.position,
         duration_seconds=req.duration_seconds,
@@ -261,6 +264,7 @@ async def save_interview_report_route(
             "position": req.position,
             "duration_seconds": req.duration_seconds,
             "overall_score": req.overall_score,
+            "job_id": str(req.job_id) if req.job_id else None,
             "qa_count": len(req.scored_qa or []),
             "transcript_events": len(req.transcript_events or []),
         },

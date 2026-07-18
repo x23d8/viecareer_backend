@@ -23,6 +23,7 @@ from services.job_ingestion_service import sync_authorized_sources
 from services.job_market_service import (
     clear_recent_searches,
     get_job,
+    get_job_practice_context,
     get_job_match_context,
     get_job_preferences,
     get_market_insights,
@@ -183,6 +184,22 @@ def job_detail(
         "data": get_job(
             job_id=job_id,
             external_auth_id=current_user.user_id if current_user else None,
+        )
+    }
+
+
+@router.get("/{job_id}/practice-context")
+@limiter.limit("30/minute")
+def job_practice_context(
+    request: Request,
+    job_id: str,
+    current_user: ClerkUser = Depends(require_auth),
+):
+    del request
+    return {
+        "data": get_job_practice_context(
+            job_id=job_id,
+            external_auth_id=current_user.user_id,
         )
     }
 

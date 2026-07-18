@@ -15,6 +15,7 @@ def save_cv_jd_analysis(
     email: str,
     account_full_name: str,
     analysis: dict[str, Any],
+    job_id: str | None = None,
     avatar_url: str | None = None,
     auth_provider: str = "clerk",
 ) -> dict[str, Any]:
@@ -50,6 +51,7 @@ def save_cv_jd_analysis(
                     """
                     insert into cv_jd_analyses (
                       user_id,
+                      job_id,
                       full_name,
                       target_position,
                       education_level,
@@ -69,11 +71,12 @@ def save_cv_jd_analysis(
                       d5_baseline,
                       llm_raw_json
                     )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     returning *
                     """,
                     (
                         user["id"],
+                        job_id or None,
                         analysis.get("fullName"),
                         analysis.get("targetPosition"),
                         analysis.get("educationLevel"),
@@ -105,6 +108,9 @@ def save_cv_jd_analysis(
 
 
 def _ensure_cv_jd_analysis_columns(cur) -> None:
+    cur.execute(
+        "alter table cv_jd_analyses add column if not exists job_id uuid null references jobs(id) on delete set null"
+    )
     cur.execute("alter table cv_jd_analyses add column if not exists ats_score int null")
     cur.execute("alter table cv_jd_analyses add column if not exists jri_baseline int null")
     cur.execute("alter table cv_jd_analyses add column if not exists d1_baseline int null")

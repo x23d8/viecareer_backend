@@ -253,6 +253,42 @@ def get_job(*, job_id: str, external_auth_id: str | None) -> dict[str, Any]:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Could not load this job.") from exc
 
 
+def get_job_practice_context(*, job_id: str, external_auth_id: str) -> dict[str, Any]:
+    """Return the authoritative JD snapshot used to start a job-specific interview flow."""
+
+    job = get_job(job_id=job_id, external_auth_id=external_auth_id)
+    description = "\n".join(
+        line.strip() for line in str(job.get("description") or "").splitlines() if line.strip()
+    )
+    if len(description) < 120:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="This job does not contain enough JD content for interview practice.",
+        )
+
+    primary_source = str(job.get("primary_source") or "viecareer")
+    source_link = next(
+        (
+            source
+            for source in job.get("sources") or []
+            if str(source.get("source") or "") == primary_source
+        ),
+        (job.get("sources") or [{}])[0] if job.get("sources") else {},
+    )
+    return {
+        "job_id": job["id"],
+        "title": job["title"],
+        "company_name": job["company_name"],
+        "location": job.get("location"),
+        "experience_level": job.get("experience_level"),
+        "skills": [str(skill) for skill in (job.get("skills") or [])][:100],
+        "job_description": description[:50_000],
+        "source": primary_source,
+        "source_url": source_link.get("source_url") or job.get("apply_url"),
+        "last_seen_at": job.get("last_seen_at"),
+    }
+
+
 def get_job_match_context(*, job_id: str, external_auth_id: str) -> dict[str, Any]:
     """Load only the profile/job signals needed for a short on-demand AI explanation."""
 
