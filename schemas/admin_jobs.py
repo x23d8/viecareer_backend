@@ -16,6 +16,10 @@ class AdminJobCrawlPreviewRequest(BaseModel):
     sources: list[CrawlerSource] = Field(..., min_length=1, max_length=3)
     job_type: str = Field(..., min_length=2, max_length=120)
     level: CrawlLevel | None = None
+    location: str | None = Field(default=None, max_length=200)
+    company: str | None = Field(default=None, max_length=200)
+    experience_years_min: int | None = Field(default=None, ge=0, le=50)
+    experience_years_max: int | None = Field(default=None, ge=0, le=50)
     max_results: int = Field(default=20, ge=1, le=100)
 
     @field_validator("sources")
@@ -27,6 +31,22 @@ class AdminJobCrawlPreviewRequest(BaseModel):
     @classmethod
     def normalize_job_type(cls, value: str) -> str:
         return " ".join(value.split())
+
+    @field_validator("location", "company")
+    @classmethod
+    def normalize_optional_filter(cls, value: str | None) -> str | None:
+        normalized = " ".join((value or "").split())
+        return normalized or None
+
+    @model_validator(mode="after")
+    def validate_experience_range(self):
+        if (
+            self.experience_years_min is not None
+            and self.experience_years_max is not None
+            and self.experience_years_max < self.experience_years_min
+        ):
+            raise ValueError("experience_years_max must be greater than or equal to experience_years_min")
+        return self
 
 
 class AdminJobCrawlCommitRequest(BaseModel):

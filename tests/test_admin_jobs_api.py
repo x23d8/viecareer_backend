@@ -13,7 +13,7 @@ from schemas.admin_jobs import AdminManualJobCreateRequest  # noqa: E402
 from schemas.jobs import JobIngestionPayload  # noqa: E402
 from services.admin_job_service import create_manual_job  # noqa: E402
 from services import admin_job_crawler_service as crawler_service  # noqa: E402
-from services.job_ingestion_service import SourceAccessBlocked  # noqa: E402
+from services.job_ingestion_service import SourceAccessBlocked, _matches_preview_filters  # noqa: E402
 
 
 class AdminJobsApiTests(unittest.TestCase):
@@ -51,6 +51,10 @@ class AdminJobsApiTests(unittest.TestCase):
                     "sources": ["topcv", "itviec"],
                     "job_type": "AI Engineer",
                     "level": "senior",
+                    "location": "Ho Chi Minh",
+                    "company": "Acme",
+                    "experience_years_min": 3,
+                    "experience_years_max": 6,
                     "max_results": 10,
                 },
             )
@@ -61,8 +65,64 @@ class AdminJobsApiTests(unittest.TestCase):
             sources=["topcv", "itviec"],
             job_type="AI Engineer",
             level="senior",
+            location="Ho Chi Minh",
+            company="Acme",
+            experience_years_min=3,
+            experience_years_max=6,
             max_results=10,
         )
+
+    def test_preview_job_filters_match_accents_company_and_experience_overlap(self):
+        payload = JobIngestionPayload(
+            external_id="1234",
+            source_url="https://itviec.com/it-jobs/backend-engineer-acme-1234",
+            title="Backend Engineer",
+            company_name="ACME Việt Nam",
+            location="Đà Nẵng, Việt Nam",
+            experience_years_min=3,
+            experience_years_max=5,
+            description="Build backend systems.",
+        )
+        self.assertTrue(
+            _matches_preview_filters(
+                payload,
+                location="Da Nang",
+                company="acme viet nam",
+                experience_years_min=4,
+                experience_years_max=6,
+            )
+        )
+        self.assertFalse(
+            _matches_preview_filters(
+                payload,
+                location="Ha Noi",
+                company=None,
+                experience_years_min=None,
+                experience_years_max=None,
+            )
+        )
+        self.assertFalse(
+            _matches_preview_filters(
+                payload,
+                location=None,
+                company=None,
+                experience_years_min=6,
+                experience_years_max=8,
+            )
+        )
+
+    def test_preview_rejects_an_inverted_experience_filter(self):
+        response = self.client.post(
+            "/api/admin/job-crawler/preview",
+            json={
+                "sources": ["itviec"],
+                "job_type": "Backend Engineer",
+                "experience_years_min": 5,
+                "experience_years_max": 2,
+                "max_results": 10,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
 
     def test_preview_rejects_internal_source(self):
         response = self.client.post(

@@ -62,6 +62,10 @@ def create_crawl_preview(
     job_type: str,
     level: str | None,
     max_results: int,
+    location: str | None = None,
+    company: str | None = None,
+    experience_years_min: int | None = None,
+    experience_years_max: int | None = None,
 ) -> dict:
     _purge_expired_sessions()
     entries: list[PreviewEntry] = []
@@ -76,6 +80,10 @@ def create_crawl_preview(
                 source,
                 job_type=job_type,
                 level=level,
+                location=location,
+                company=company,
+                experience_years_min=experience_years_min,
+                experience_years_max=experience_years_max,
                 limit=remaining,
             )
             for payload in result.pop("items"):
@@ -92,6 +100,7 @@ def create_crawl_preview(
                     "discovered_count": 0,
                     "scanned_count": 0,
                     "normalized_count": 0,
+                    "filtered_out_count": 0,
                     "pages_crawled": 0,
                     "has_more": False,
                     "remaining_status": "No more jobs left because the source blocked access.",
@@ -109,6 +118,7 @@ def create_crawl_preview(
                     "discovered_count": 0,
                     "scanned_count": 0,
                     "normalized_count": 0,
+                    "filtered_out_count": 0,
                     "pages_crawled": 0,
                     "has_more": False,
                     "remaining_status": "No more jobs could be checked because discovery failed.",
@@ -131,6 +141,12 @@ def create_crawl_preview(
         "preview_id": preview_id,
         "job_type": job_type,
         "level": level,
+        "filters": {
+            "location": location,
+            "company": company,
+            "experience_years_min": experience_years_min,
+            "experience_years_max": experience_years_max,
+        },
         "detected_count": sum(item["discovered_count"] for item in source_results),
         "available_count": len(entries),
         "has_more": has_more,
@@ -211,6 +227,8 @@ def _preview_payload(entry: PreviewEntry) -> dict:
         "workplace_type": payload.workplace_type,
         "employment_type": payload.employment_type,
         "experience_level": payload.experience_level,
+        "experience_years_min": payload.experience_years_min,
+        "experience_years_max": payload.experience_years_max,
         "salary_text": payload.salary_text,
         "skills": payload.skills[:12],
         "posted_at": payload.posted_at,

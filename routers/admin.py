@@ -13,6 +13,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     status,
 )
 from fastapi.responses import StreamingResponse
@@ -21,8 +22,9 @@ from core.api_usage import ensure_tracking_tables
 from core.clerk_auth import AdminUser, require_admin
 from core.database import get_connection
 from core.rate_limit import limiter
-from schemas.admin import AdminUserStatusRequest
+from schemas.admin import AdminReportExportRequest, AdminUserStatusRequest
 from schemas.events import LandingMetricGroupBy, LandingSource
+from services.admin_report_export_service import build_admin_report_workbook
 from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics as get_feature_metrics_service
 from services.landing_event_service import ensure_landing_events_schema, get_landing_metrics
 
@@ -395,6 +397,58 @@ def get_admin_overview(
             },
         }
     }
+
+
+@router.post("/reports/export")
+@limiter.limit("5/minute")
+def export_admin_reports(
+    request: Request,
+    payload: AdminReportExportRequest,
+    current_admin: AdminUser = Depends(require_admin),
+):
+    """Export selected admin report pages as one formatted Excel workbook."""
+
+    del request
+    try:
+        ensure_tracking_tables()
+        if "activity" in payload.pages:
+            _ensure_activity_logs_schema()
+
+        overview_data = None
+        if "overview" in payload.pages:
+            overview_data = get_admin_overview(
+                date_from=payload.date_from,
+                date_to=payload.date_to,
+                group_by=payload.group_by,
+                current_admin=current_admin,
+            )["data"]
+
+        workbook = build_admin_report_workbook(
+            pages=list(payload.pages),
+            date_from=payload.date_from,
+            date_to=payload.date_to,
+            generated_by=current_admin.email or current_admin.user_id,
+            overview_data=overview_data,
+            plan_filter=payload.plan_filter,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not export admin reports")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not export the selected admin reports.",
+        ) from exc
+
+    filename = f"viecareer-admin-reports-{datetime.now(timezone.utc).date().isoformat()}.xlsx"
+    return Response(
+        content=workbook,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/users")

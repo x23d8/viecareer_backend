@@ -36,7 +36,7 @@ class InterviewSimulationService:
             usage_context=self.usage_context,
         )
         blueprint = _parse_json_object(raw)
-        return _normalize_blueprint(blueprint, req.target_question_count)
+        return _normalize_blueprint(blueprint, req.target_question_count, req.language)
 
     def generate_coding_plan(self, req: GenerateCodingPlanRequest) -> dict[str, Any]:
         prompt = _coding_plan_prompt(req)
@@ -202,27 +202,53 @@ def _parse_json_object(raw: str | None) -> dict[str, Any]:
     return parsed
 
 
-def _normalize_blueprint(blueprint: dict[str, Any], target_count: int) -> dict[str, Any]:
+def _normalize_blueprint(
+    blueprint: dict[str, Any],
+    target_count: int,
+    language: str = "en",
+) -> dict[str, Any]:
     questions = blueprint.get("questions")
     if not isinstance(questions, list):
         blueprint["questions"] = []
         questions = blueprint["questions"]
 
+    normalized_questions: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
     for index, question in enumerate(questions, start=1):
         if not isinstance(question, dict):
             continue
-        question.setdefault("id", f"question_{index:03d}")
+        question_id = str(question.get("id") or f"question_{index:03d}").strip()
+        if not question_id or question_id in used_ids:
+            question_id = f"question_{index:03d}"
+            while question_id in used_ids:
+                question_id += "_next"
+        question["id"] = question_id
+        used_ids.add(question_id)
         question.setdefault("level", 1)
         question.setdefault("skipIf", [])
         question.setdefault("followUpIfStrong", None)
         question.setdefault("followUpIfWeak", None)
+        normalized_questions.append(question)
+        if len(normalized_questions) >= target_count:
+            break
+
+    while len(normalized_questions) < target_count:
+        fallback_index = len(normalized_questions) + 1
+        question_id = f"fallback_question_{fallback_index:03d}"
+        while question_id in used_ids:
+            question_id += "_next"
+        used_ids.add(question_id)
+        normalized_questions.append(_fallback_interview_question(fallback_index, question_id, language))
+
+    blueprint["questions"] = normalized_questions
+    questions = normalized_questions
 
     blueprint.setdefault("questionAllocation", _default_allocation(target_count))
     blueprint.setdefault("runtimePolicy", {})
-    blueprint["runtimePolicy"].setdefault(
-        "openingQuestionId",
-        questions[0].get("id") if questions and isinstance(questions[0], dict) else None,
-    )
+    valid_ids = {str(question.get("id")) for question in questions}
+    opening_id = str(blueprint["runtimePolicy"].get("openingQuestionId") or "")
+    if opening_id not in valid_ids:
+        blueprint["runtimePolicy"]["openingQuestionId"] = questions[0].get("id") if questions else None
     blueprint["runtimePolicy"].setdefault(
         "scoringDimensions",
         [
@@ -234,6 +260,36 @@ def _normalize_blueprint(blueprint: dict[str, Any], target_count: int) -> dict[s
         ],
     )
     return blueprint
+
+
+def _fallback_interview_question(index: int, question_id: str, language: str) -> dict[str, Any]:
+    english = [
+        ("personal_experience", "relevant experience", "Tell me about the experience that best prepared you for this role."),
+        ("cv_tech_deep_dive", "technical challenge", "Describe a difficult technical problem you solved and how you approached it."),
+        ("role_specific_knowledge", "engineering tradeoffs", "How do you evaluate tradeoffs when choosing a technical solution?"),
+        ("role_specific_knowledge", "quality and reliability", "How do you make sure your work is reliable and ready for production?"),
+        ("personal_experience", "collaboration", "Tell me about a time you resolved a disagreement within a team."),
+        ("role_specific_knowledge", "prioritization", "How do you prioritize when several important tasks compete for your attention?"),
+    ]
+    vietnamese = [
+        ("personal_experience", "kinh nghiệm phù hợp", "Hãy chia sẻ kinh nghiệm đã chuẩn bị cho bạn tốt nhất để đảm nhận vị trí này."),
+        ("cv_tech_deep_dive", "thách thức kỹ thuật", "Hãy mô tả một vấn đề kỹ thuật khó mà bạn đã giải quyết và cách bạn tiếp cận vấn đề đó."),
+        ("role_specific_knowledge", "đánh đổi kỹ thuật", "Bạn đánh giá các yếu tố đánh đổi như thế nào khi lựa chọn một giải pháp kỹ thuật?"),
+        ("role_specific_knowledge", "chất lượng và độ tin cậy", "Bạn làm gì để bảo đảm sản phẩm của mình đáng tin cậy và sẵn sàng vận hành thực tế?"),
+        ("personal_experience", "hợp tác", "Hãy kể về một lần bạn giải quyết bất đồng trong nhóm."),
+        ("role_specific_knowledge", "ưu tiên công việc", "Bạn ưu tiên công việc như thế nào khi có nhiều nhiệm vụ quan trọng cùng lúc?"),
+    ]
+    group, topic, question = (vietnamese if str(language).lower() == "vi" else english)[(index - 1) % len(english)]
+    return {
+        "id": question_id,
+        "group": group,
+        "topic": topic,
+        "question": question,
+        "level": 1,
+        "skipIf": [],
+        "followUpIfStrong": None,
+        "followUpIfWeak": None,
+    }
 
 
 def _display_text(value: Any) -> str:

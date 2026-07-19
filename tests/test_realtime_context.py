@@ -11,7 +11,14 @@ os.environ.setdefault("CLERK_JWKS_URL", "https://example.com/.well-known/jwks.js
 
 from schemas.realtime import RealtimeSessionMetadata  # noqa: E402
 from services.interview_report_service import save_interview_report  # noqa: E402
-from services.realtime_service import _session_update_event  # noqa: E402
+from services.realtime_service import (  # noqa: E402
+    _RelayState,
+    _candidate_turn_classification,
+    _interview_questions_complete,
+    _realtime_session_config,
+    _resolve_spoken_question_id,
+    _session_update_event,
+)
 from services.realtime_transcript_service import create_live_interview_session  # noqa: E402
 
 
@@ -140,6 +147,64 @@ class RealtimeSessionMetadataTests(unittest.TestCase):
         self.assertIn("Python", session["instructions"])
         self.assertIn("entire interview in Vietnamese", session["instructions"])
 
+    def test_direct_realtime_session_uses_validated_question_progress_tool(self):
+        metadata = RealtimeSessionMetadata.model_validate(valid_metadata()).model_dump(mode="json")
+        config = _realtime_session_config(metadata, metadata["blueprint"], create_response=True)
+
+        self.assertEqual(config["tool_choice"], "auto")
+        tool = config["tools"][0]
+        self.assertEqual(tool["name"], "mark_interview_question_answered")
+        self.assertEqual(tool["parameters"]["properties"]["question_id"]["enum"], ["q1"])
+        self.assertIn("Never call", tool["description"])
+
+    def test_clarification_and_repeat_requests_do_not_count_as_answers(self):
+        for transcript in (
+            "Could you repeat the question?",
+            "I didn't understand, can you clarify?",
+            "Bạn có thể nhắc lại câu hỏi không?",
+        ):
+            with self.subTest(transcript=transcript):
+                turn_type, counts = _candidate_turn_classification(
+                    transcript,
+                    {"turn_type": "answer", "counts_as_answer": True},
+                )
+                self.assertEqual(turn_type, "clarification")
+                self.assertFalse(counts)
+
+    def test_unique_question_ids_control_completion(self):
+        state = _RelayState(
+            blueprint={
+                "questions": [
+                    {"id": "q1", "question": "First?"},
+                    {"id": "q2", "question": "Second?"},
+                    {"id": "q2", "question": "Repeated second?"},
+                ]
+            },
+            answered_question_ids=["q1"],
+        )
+        self.assertFalse(_interview_questions_complete(state))
+        state.answered_question_ids.append("q2")
+        self.assertTrue(_interview_questions_complete(state))
+
+    def test_repeated_spoken_question_keeps_original_question_id(self):
+        state = _RelayState(
+            blueprint={
+                "questions": [
+                    {"id": "q1", "question": "Describe a difficult production incident you resolved."},
+                    {"id": "q2", "question": "How do you evaluate engineering tradeoffs?"},
+                ]
+            },
+            asked_question_ids=["q1"],
+            active_question_id="q2",
+        )
+
+        resolved = _resolve_spoken_question_id(
+            state,
+            "Let me ask that again: Describe a difficult production incident you resolved.",
+        )
+
+        self.assertEqual(resolved, "q1")
+
     def test_persisted_session_receives_full_context_snapshot(self):
         metadata = RealtimeSessionMetadata.model_validate(valid_metadata()).model_dump(mode="json")
         cursor = _FakeCursor()
@@ -163,14 +228,15 @@ class RealtimeSessionMetadataTests(unittest.TestCase):
         self.assertEqual(session_id, "session-123")
         self.assertEqual(params[2], "11111111-1111-4111-8111-111111111111")
         self.assertEqual(params[3], "Backend Engineer")
-        self.assertEqual(params[5].adapted["name"], "Nguyen Van An")
-        self.assertEqual(params[6], "Build reliable FastAPI services.")
-        self.assertEqual(params[7:9], ("vi", "shimmer"))
-        self.assertEqual(params[9].adapted["questions"][0]["id"], "q1")
-        self.assertEqual(params[10].adapted["position"], "Backend Engineer")
-        self.assertEqual(params[10].adapted["job_id"], "11111111-1111-4111-8111-111111111111")
-        self.assertNotIn("email", params[10].adapted)
-        self.assertNotIn("external_auth_id", params[10].adapted)
+        self.assertEqual(params[4], "11111111-1111-4111-8111-111111111111")
+        self.assertEqual(params[6].adapted["name"], "Nguyen Van An")
+        self.assertEqual(params[7], "Build reliable FastAPI services.")
+        self.assertEqual(params[8:10], ("vi", "shimmer"))
+        self.assertEqual(params[10].adapted["questions"][0]["id"], "q1")
+        self.assertEqual(params[11].adapted["position"], "Backend Engineer")
+        self.assertEqual(params[11].adapted["job_id"], "11111111-1111-4111-8111-111111111111")
+        self.assertNotIn("email", params[11].adapted)
+        self.assertNotIn("external_auth_id", params[11].adapted)
         self.assertTrue(connection.committed)
 
     def test_final_report_updates_the_live_session_instead_of_creating_another(self):

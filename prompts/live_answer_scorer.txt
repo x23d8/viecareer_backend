@@ -6,9 +6,18 @@ STRICT RULES:
 - Be fair but honest. Do not inflate vague, generic, incorrect, or off-topic answers.
 - Base the assessment on the polished answer, while using the raw ASR transcript only to understand possible transcription noise.
 - Keep feedback concise and useful for a final report.
+- Classify the candidate turn before scoring it:
+  - "answer": a substantive answer or a genuine attempt to answer the active question.
+  - "clarification": the candidate asks what the question means or asks for clarification.
+  - "repeat_request": the candidate asks to hear the same question again.
+  - "skip": the candidate explicitly says they do not know, cannot answer, or want to skip. This counts as a completed attempt.
+  - "off_topic": the turn does not answer the active question and is not an explicit skip.
+- Set counts_as_answer=true only for "answer" or "skip". Never count clarification, repeat_request, or off_topic.
 
 Return this exact shape:
 {
+  "turn_type": "answer|clarification|repeat_request|skip|off_topic",
+  "counts_as_answer": true,
   "score": <0-100>,
   "feedback": "one or two short sentences",
   "strengths": ["specific strength"],

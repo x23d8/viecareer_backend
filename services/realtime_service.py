@@ -158,6 +158,7 @@ class _RelayState:
     session_id: str | None = None
     event_order: int = 0
     question_order: int = 0
+    asked_question_ids: list[str] = field(default_factory=list)
     pending_question: str = ""
     pending_question_id: str | None = None
     pending_question_event: dict[str, Any] | None = None
@@ -166,6 +167,8 @@ class _RelayState:
     transcript: list[dict[str, Any]] = field(default_factory=list)
     answered_question_ids: list[str] = field(default_factory=list)
     covered_topics: list[str] = field(default_factory=list)
+    response_kind: str = "question"
+    closing_in_progress: bool = False
     initialized: bool = False
     completed: bool = False
     realtime_usage_logged: bool = False
@@ -395,7 +398,7 @@ async def _openai_to_client(websocket: WebSocket, openai_ws, state: _RelayState)
     async for raw_message in openai_ws:
         message = raw_message.decode("utf-8") if isinstance(raw_message, bytes) else raw_message
         await websocket.send_text(message)
-        await _persist_realtime_event(message, state, openai_ws)
+        await _persist_realtime_event(message, state, openai_ws, websocket)
 
 
 async def _interrupt_realtime_playback(openai_ws, websocket: WebSocket) -> None:
@@ -485,6 +488,7 @@ async def _process_push_to_talk_turn(
     )
 
     scoring = await _score_push_to_talk_answer(state, raw_transcript, polished, language)
+    turn_type, counts_as_answer = _candidate_turn_classification(polished, scoring)
 
     transcript_event = _transcript_event(state, "user", polished)
     transcript_event["raw_transcript"] = raw_transcript
@@ -500,7 +504,20 @@ async def _process_push_to_talk_turn(
     )
     await asyncio.to_thread(_save_transcript_event_safe, state.session_id, transcript_event)
 
-    if state.pending_question:
+    await openai_ws.send(
+        json.dumps(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": polished}],
+                },
+            }
+        )
+    )
+
+    if state.pending_question and counts_as_answer:
         if state.pending_question_id and state.pending_question_id not in state.answered_question_ids:
             state.answered_question_ids.append(state.pending_question_id)
         qa_events = [evt for evt in [state.pending_question_event, transcript_event] if evt]
@@ -515,22 +532,34 @@ async def _process_push_to_talk_turn(
             polished,
             scoring,
         )
+        await websocket.send_json(
+            {
+                "type": "viecareer.interview.progress",
+                "question_id": state.pending_question_id,
+                "answered_questions": len(state.answered_question_ids),
+                "total_questions": _total_blueprint_questions(state),
+                "turn_type": turn_type,
+            }
+        )
         state.pending_question = ""
         state.pending_question_id = None
         state.pending_question_event = None
+        await _send_guided_interviewer_response(openai_ws, state)
+        return
 
-    await openai_ws.send(
-        json.dumps(
+    if state.pending_question:
+        await websocket.send_json(
             {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": polished}],
-                },
+                "type": "viecareer.interview.clarification",
+                "question_id": state.pending_question_id,
+                "answered_questions": len(state.answered_question_ids),
+                "total_questions": _total_blueprint_questions(state),
+                "turn_type": turn_type,
             }
         )
-    )
+        await _send_question_clarification_response(openai_ws, state, polished)
+        return
+
     await _send_guided_interviewer_response(openai_ws, state)
 
 
@@ -609,7 +638,7 @@ async def _enforce_realtime_time_limit(websocket: WebSocket, openai_ws, state: _
         return
 
 
-async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_ws) -> None:
+async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_ws, websocket: WebSocket) -> None:
     event = _json_object(raw_message)
     event_type = event.get("type")
 
@@ -634,6 +663,8 @@ async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_w
         )
         if has_usage:
             state.realtime_usage_logged = True
+        if state.closing_in_progress and not state.completed:
+            await _finalize_question_limited_interview(websocket, openai_ws, state)
         return
 
     if event_type in {"response.output_audio_transcript.done", "response.audio_transcript.done"}:
@@ -641,11 +672,16 @@ async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_w
         if not text:
             return
 
-        state.question_order += 1
+        state.active_question_id = _resolve_spoken_question_id(state, text)
+        if state.response_kind != "closing" and state.active_question_id:
+            if state.active_question_id not in state.asked_question_ids:
+                state.asked_question_ids.append(state.active_question_id)
+            state.question_order = len(state.asked_question_ids)
         transcript_event = _transcript_event(state, "assistant", text)
-        state.pending_question = text
-        state.pending_question_id = state.active_question_id
-        state.pending_question_event = transcript_event
+        if state.response_kind != "closing" and state.active_question_id:
+            state.pending_question = _blueprint_question_text(state, state.active_question_id) or text
+            state.pending_question_id = state.active_question_id
+            state.pending_question_event = transcript_event
         state.transcript.append(
             {
                 "role": "assistant",
@@ -751,7 +787,7 @@ def _realtime_session_config(
             if part
         )
 
-    return {
+    config: dict[str, Any] = {
         "type": "realtime",
         "model": OPENAI_REALTIME_MODEL,
         "instructions": instructions,
@@ -774,6 +810,38 @@ def _realtime_session_config(
             },
         },
     }
+    if create_response:
+        question_ids = [str(question.get("id")) for question in _valid_blueprint_questions(blueprint)]
+        if question_ids:
+            config["tools"] = [
+                {
+                    "type": "function",
+                    "name": "mark_interview_question_answered",
+                    "description": (
+                        "Report that the candidate completed a substantive answer or explicitly skipped the active "
+                        "interview question. Call exactly once before moving to another question. Never call when the "
+                        "candidate asks for repetition, clarification, or has not answered the active question."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question_id": {
+                                "type": "string",
+                                "enum": question_ids,
+                                "description": "The exact id of the active blueprint question that was answered.",
+                            },
+                            "turn_type": {
+                                "type": "string",
+                                "enum": ["answer", "skip"],
+                                "description": "Whether the candidate answered or explicitly skipped the question.",
+                            },
+                        },
+                        "required": ["question_id", "turn_type"],
+                    },
+                }
+            ]
+            config["tool_choice"] = "auto"
+    return config
 
 
 def _client_secret_value(payload: Any) -> str:
@@ -803,10 +871,18 @@ def _websocket_headers_kwargs(headers: dict[str, str]) -> dict[str, dict[str, st
 
 
 async def _send_guided_interviewer_response(openai_ws, state: _RelayState) -> None:
+    if _interview_questions_complete(state):
+        await _send_interview_closing_response(openai_ws, state)
+        return
+
     selected = await asyncio.to_thread(_select_next_question_safe, state)
     if selected:
         selected_id = str(selected.get("id") or "")
         state.active_question_id = selected_id or None
+        state.response_kind = "question"
+    else:
+        await _send_interview_closing_response(openai_ws, state)
+        return
 
     await openai_ws.send(
         json.dumps(
@@ -820,8 +896,210 @@ async def _send_guided_interviewer_response(openai_ws, state: _RelayState) -> No
     )
 
 
+async def _send_question_clarification_response(
+    openai_ws,
+    state: _RelayState,
+    candidate_turn: str,
+) -> None:
+    """Clarify or repeat the active question without advancing interview progress."""
+
+    state.response_kind = "clarification"
+    question = state.pending_question or _blueprint_question_text(state, state.active_question_id)
+    language = str(state.metadata.get("language") or "en").lower()
+    language_rule = "Respond in Vietnamese." if language == "vi" else "Respond in English."
+    await openai_ws.send(
+        json.dumps(
+            {
+                "type": "response.create",
+                "response": {
+                    "instructions": "\n".join(
+                        [
+                            language_rule,
+                            "The candidate asked for repetition or clarification and has not answered the active question.",
+                            "Briefly clarify or rephrase the same question. Do not introduce or count a new interview question.",
+                            f"Active question: {question}",
+                            f"Candidate request: {candidate_turn}",
+                            "Keep the response under 45 words and end with only the rephrased active question.",
+                        ]
+                    )
+                },
+            }
+        )
+    )
+
+
+async def _send_interview_closing_response(openai_ws, state: _RelayState) -> None:
+    if state.closing_in_progress or state.completed:
+        return
+
+    state.closing_in_progress = True
+    state.response_kind = "closing"
+    state.active_question_id = None
+    state.pending_question = ""
+    state.pending_question_id = None
+    state.pending_question_event = None
+    language = str(state.metadata.get("language") or "en").lower()
+    closing = (
+        "Đây là phần kết thúc của buổi phỏng vấn. Cảm ơn bạn đã trả lời. Tiếp theo, bạn sẽ chuyển sang phần phỏng vấn lập trình."
+        if language == "vi"
+        else "This is the end of the interview. Thank you for your answers. Next, you will continue to the coding interview."
+    )
+    await openai_ws.send(
+        json.dumps(
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {"viecareer_phase": "interview_closing"},
+                    "instructions": (
+                        f"Say exactly this closing message and nothing else: {closing} "
+                        "Do not ask another question."
+                    ),
+                },
+            }
+        )
+    )
+
+
+async def _finalize_question_limited_interview(
+    websocket: WebSocket,
+    openai_ws,
+    state: _RelayState,
+) -> None:
+    duration_seconds = _bounded_duration_seconds(state.timestamp_sec(), state.max_duration_seconds)
+    await asyncio.to_thread(_complete_live_session_safe, state.session_id, duration_seconds)
+    state.completed = True
+    track_user_activity_async(
+        "interview_completed",
+        external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id,
+        object_type="interview_session",
+        object_id=state.session_id,
+        meta={
+            "duration_seconds": duration_seconds,
+            "questions_asked": len(state.asked_question_ids),
+            "questions_answered": len(state.answered_question_ids),
+            "transcript_turns": len(state.transcript),
+            "completion_reason": "question_limit_reached",
+        },
+    )
+    _track_realtime_session_estimate(state, duration_seconds)
+    await websocket.send_json(
+        {
+            "type": "viecareer.interview.completed",
+            "reason": "question_limit_reached",
+            "answered_questions": len(state.answered_question_ids),
+            "total_questions": _total_blueprint_questions(state),
+            "next_flow": "coding",
+            "next_path": "/coding",
+            "auto_transition": True,
+        }
+    )
+    await openai_ws.close(code=1000, reason="Interview question limit reached")
+
+
+def _candidate_turn_classification(
+    transcript: str,
+    scoring: dict[str, Any] | None,
+) -> tuple[str, bool]:
+    """Conservatively decide whether a candidate turn answers the active question."""
+
+    normalized = re.sub(r"\s+", " ", str(transcript or "").strip().casefold())
+    clarification_patterns = (
+        r"\b(can|could|would) you (repeat|rephrase|clarify|explain)\b",
+        r"\b(please )?(repeat|rephrase|clarify) (that|the question|it)\b",
+        r"\bwhat do you mean\b",
+        r"\bi (do not|don't|did not|didn't) (understand|hear|catch)\b",
+        r"\bcome again\b",
+        r"\b(bạn|anh|chị) (có thể )?(nhắc lại|nói lại|giải thích|làm rõ)\b",
+        r"\b(tôi|em|mình) (chưa|không) (hiểu|nghe rõ)\b",
+        r"\bý (bạn|anh|chị) là (gì|sao)\b",
+        r"\bcâu hỏi (là gì|như thế nào|gì vậy)\b",
+    )
+    if any(re.search(pattern, normalized) for pattern in clarification_patterns):
+        return "clarification", False
+
+    allowed_types = {"answer", "clarification", "repeat_request", "skip", "off_topic"}
+    raw_type = str((scoring or {}).get("turn_type") or "answer").strip().lower()
+    turn_type = raw_type if raw_type in allowed_types else "answer"
+    if turn_type in {"clarification", "repeat_request", "off_topic"}:
+        return turn_type, False
+    if turn_type == "skip":
+        return turn_type, True
+    raw_counts = (scoring or {}).get("counts_as_answer")
+    return turn_type, raw_counts if isinstance(raw_counts, bool) else True
+
+
+def _blueprint_questions(state: _RelayState) -> list[dict[str, Any]]:
+    questions = (state.blueprint or {}).get("questions") or []
+    return [question for question in questions if isinstance(question, dict) and str(question.get("id") or "").strip()]
+
+
+def _total_blueprint_questions(state: _RelayState) -> int:
+    return len({str(question.get("id")) for question in _blueprint_questions(state)})
+
+
+def _interview_questions_complete(state: _RelayState) -> bool:
+    question_ids = {str(question.get("id")) for question in _blueprint_questions(state)}
+    return bool(question_ids) and question_ids.issubset(set(state.answered_question_ids))
+
+
+def _blueprint_question_text(state: _RelayState, question_id: str | None) -> str:
+    if not question_id:
+        return ""
+    for question in _blueprint_questions(state):
+        if str(question.get("id")) == question_id:
+            return str(question.get("question") or "").strip()
+    return ""
+
+
+def _resolve_spoken_question_id(state: _RelayState, transcript: str) -> str | None:
+    """Keep duplicate spoken questions attached to their original blueprint id."""
+
+    expected_id = state.active_question_id
+    if state.response_kind == "closing" or not expected_id:
+        return expected_id
+
+    spoken_tokens = _question_tokens(transcript)
+    if not spoken_tokens:
+        return expected_id
+
+    scores: list[tuple[float, str]] = []
+    for question in _blueprint_questions(state):
+        question_id = str(question.get("id"))
+        canonical_tokens = _question_tokens(str(question.get("question") or ""))
+        if not canonical_tokens:
+            continue
+        coverage = len(canonical_tokens.intersection(spoken_tokens)) / len(canonical_tokens)
+        scores.append((coverage, question_id))
+
+    if not scores:
+        return expected_id
+    best_score, best_id = max(scores)
+    expected_score = next((score for score, question_id in scores if question_id == expected_id), 0.0)
+    if best_id in state.asked_question_ids and best_score >= 0.55 and best_score > expected_score + 0.10:
+        return best_id
+    return expected_id
+
+
+def _question_tokens(value: str) -> set[str]:
+    normalized = unicodedata.normalize("NFD", value.casefold().replace("đ", "d"))
+    normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+    stopwords = {
+        "a", "an", "and", "are", "can", "could", "do", "for", "how", "in", "is", "of", "or",
+        "the", "this", "to", "what", "when", "where", "which", "with", "would", "you", "your",
+        "ban", "cach", "co", "cua", "da", "hay", "khi", "la", "mot", "nao", "nhu", "the", "va",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", normalized)
+        if len(token) > 2 and token not in stopwords
+    }
+
+
 def _select_next_question_safe(state: _RelayState) -> dict[str, Any] | None:
     if not state.blueprint:
+        return None
+
+    if _interview_questions_complete(state):
         return None
 
     if not state.answered_question_ids and not any(turn.get("role") == "assistant" for turn in state.transcript):
@@ -871,9 +1149,6 @@ def _select_next_question_safe(state: _RelayState) -> dict[str, Any] | None:
 
 def _response_instructions(state: _RelayState, selected: dict[str, Any] | None) -> str:
     first_response = state.question_order == 0
-    total_questions = len((state.blueprint or {}).get("questions", []))
-    answered_count = len(state.answered_question_ids)
-    is_final = total_questions > 0 and answered_count >= total_questions - 1
     greeting = _opening_greeting(state.metadata)
 
     if selected:
@@ -896,8 +1171,6 @@ def _response_instructions(state: _RelayState, selected: dict[str, Any] | None) 
                 f"Begin with exactly this greeting sentence: {greeting} "
                 "Then ask the selected question."
             )
-        elif is_final:
-            opening = "This is the final question. After asking it, note that this concludes the interview questions."
         else:
             opening = "Acknowledge the candidate's previous answer in one short sentence, then ask the selected question."
         return "\n".join(
@@ -1047,7 +1320,7 @@ def _blueprint_context(blueprint: dict[str, Any] | None, *, direct_conversation:
 
     analysis = blueprint.get("analysis") if isinstance(blueprint.get("analysis"), dict) else {}
     runtime_policy = blueprint.get("runtimePolicy") if isinstance(blueprint.get("runtimePolicy"), dict) else {}
-    questions = blueprint.get("questions") if isinstance(blueprint.get("questions"), list) else []
+    questions = _valid_blueprint_questions(blueprint)
     compact_questions = [
         {
             "id": question.get("id"),
@@ -1061,7 +1334,7 @@ def _blueprint_context(blueprint: dict[str, Any] | None, *, direct_conversation:
     ]
 
     controller_policy = (
-        "You are directly managing the live interview. Ask one question at a time, track which question ids have been covered, and choose the next unasked question from the question bank after each candidate answer."
+        "You are directly managing the live interview. Ask the blueprint questions one at a time and never invent an additional main question. After a substantive answer or an explicit skip, you MUST call mark_interview_question_answered with the active question id before asking another question. If the candidate asks you to repeat, rephrase, explain, or clarify, do not call the tool and do not advance; help them understand and repeat the same active question. A repeated or rephrased question is the same question and must never increase progress. After the tool reports that all unique question ids are completed, do not ask another question; wait for the application-controlled closing response."
         if direct_conversation
         else "An adaptive controller will select the next question after each candidate answer. Do not invent a different main question when a selected question is provided."
     )
@@ -1076,6 +1349,23 @@ def _blueprint_context(blueprint: dict[str, Any] | None, *, direct_conversation:
             f"Question bank preview: {json.dumps(compact_questions, ensure_ascii=False)}",
         ]
     )
+
+
+def _valid_blueprint_questions(blueprint: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not blueprint:
+        return []
+    questions = blueprint.get("questions") if isinstance(blueprint.get("questions"), list) else []
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        question_id = str(question.get("id") or "").strip()
+        if not question_id or question_id in seen:
+            continue
+        seen.add(question_id)
+        unique.append(question)
+    return unique
 
 
 def _first_unanswered_question(state: _RelayState) -> dict[str, Any] | None:

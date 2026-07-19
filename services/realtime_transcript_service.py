@@ -58,6 +58,7 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                   cv_jd_analysis_id,
                   job_id,
                   position,
+                  company,
                   session_type,
                   status,
                   started_at,
@@ -68,7 +69,11 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                   blueprint_json,
                   context_json
                 )
-                values (%s, %s, %s, %s, %s, 'in_progress', now(), %s, %s, %s, %s, %s, %s)
+                values (
+                  %s, %s, %s, %s,
+                  (select company_name from jobs where id = %s),
+                  %s, 'in_progress', now(), %s, %s, %s, %s, %s, %s
+                )
                 returning id
                 """,
                 (
@@ -76,6 +81,7 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                     metadata.get("cv_jd_analysis_id") or None,
                     metadata.get("job_id") or None,
                     position,
+                    metadata.get("job_id") or None,
                     interview_style,
                     Json(candidate),
                     job_description,

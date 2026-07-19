@@ -42,7 +42,10 @@ app.add_middleware(PayloadSizeLimitMiddleware)
 app.add_middleware(
     AsyncTimeoutMiddleware,
     timeout=90,
-    path_timeouts={"/api/admin/job-crawler/preview": 180},
+    path_timeouts={
+        "/api/admin/job-crawler/preview": 180,
+        "/api/admin/reports/export": 180,
+    },
 )
 
 # 1. IP rate limiter via slowapi

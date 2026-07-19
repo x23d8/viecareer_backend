@@ -45,6 +45,10 @@ async def preview_jobs(
         sources=payload.sources,
         job_type=payload.job_type,
         level=payload.level,
+        location=payload.location,
+        company=payload.company,
+        experience_years_min=payload.experience_years_min,
+        experience_years_max=payload.experience_years_max,
         max_results=payload.max_results,
     )
     return {"data": result}

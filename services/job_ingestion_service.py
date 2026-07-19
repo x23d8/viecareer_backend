@@ -167,6 +167,10 @@ def preview_source_jobs(
     *,
     job_type: str,
     level: str | None = None,
+    location: str | None = None,
+    company: str | None = None,
+    experience_years_min: int | None = None,
+    experience_years_max: int | None = None,
     limit: int = 20,
 ) -> dict[str, Any]:
     """Discover and normalize jobs without writing any database records."""
@@ -187,6 +191,7 @@ def preview_source_jobs(
     discovered_set: set[str] = set()
     attempted: set[str] = set()
     pages_crawled = 0
+    filtered_out_count = 0
     has_more = False
     detail_limit = min(max(1, limit), JOB_SOURCE_MAX_DETAILS)
 
@@ -246,6 +251,16 @@ def preview_source_jobs(
                     _require_robots_permission(client, detail_url, robots_cache)
                     payload = _extract_job_payload(definition, detail_url, _fetch(client, detail_url))
                     if level and payload.experience_level != level:
+                        filtered_out_count += 1
+                        continue
+                    if not _matches_preview_filters(
+                        payload,
+                        location=location,
+                        company=company,
+                        experience_years_min=experience_years_min,
+                        experience_years_max=experience_years_max,
+                    ):
+                        filtered_out_count += 1
                         continue
                     normalized.append(payload)
                 except Exception as exc:
@@ -267,6 +282,7 @@ def preview_source_jobs(
         "discovered_count": len(discovered),
         "scanned_count": len(attempted),
         "normalized_count": len(normalized),
+        "filtered_out_count": filtered_out_count,
         "pages_crawled": pages_crawled,
         "has_more": has_more,
         "remaining_status": (
@@ -278,6 +294,39 @@ def preview_source_jobs(
         "errors": errors[:10],
         "items": normalized,
     }
+
+
+def _matches_preview_filters(
+    payload: JobIngestionPayload,
+    *,
+    location: str | None,
+    company: str | None,
+    experience_years_min: int | None,
+    experience_years_max: int | None,
+) -> bool:
+    if location and _ascii_slug(location) not in _ascii_slug(payload.location or ""):
+        return False
+    if company and _ascii_slug(company) not in _ascii_slug(payload.company_name):
+        return False
+
+    if experience_years_min is None and experience_years_max is None:
+        return True
+    if payload.experience_years_min is None and payload.experience_years_max is None:
+        return False
+
+    job_min = payload.experience_years_min
+    job_max = payload.experience_years_max
+    if job_min is None:
+        job_min = job_max
+    if job_max is None:
+        job_max = job_min
+    if job_min is None or job_max is None:
+        return False
+    if experience_years_min is not None and job_max < experience_years_min:
+        return False
+    if experience_years_max is not None and job_min > experience_years_max:
+        return False
+    return True
 
 
 def build_keyword_listing_url(source: str, job_type: str) -> str:
@@ -617,7 +666,7 @@ def _clean_url(value: str) -> str:
 
 
 def _ascii_slug(value: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    decomposed = unicodedata.normalize("NFKD", value.casefold().replace("đ", "d"))
     return " ".join(
         "".join(character for character in decomposed if not unicodedata.combining(character)).split()
     )

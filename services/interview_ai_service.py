@@ -144,7 +144,18 @@ Return only the JSON object."""
         feature_meta={"operation": "live_answer_score", "language": _language(language)},
     )
     parsed = _parse_json_object(raw)
+    turn_type = str(parsed.get("turn_type") or "answer").strip().lower()
+    if turn_type not in {"answer", "clarification", "repeat_request", "skip", "off_topic"}:
+        turn_type = "answer"
+    raw_counts_as_answer = parsed.get("counts_as_answer")
+    counts_as_answer = (
+        raw_counts_as_answer
+        if isinstance(raw_counts_as_answer, bool)
+        else turn_type in {"answer", "skip"}
+    )
     return {
+        "turn_type": turn_type,
+        "counts_as_answer": counts_as_answer,
         "score": _score(parsed.get("score")),
         "feedback": str(parsed.get("feedback") or "").strip(),
         "strengths": _string_list(parsed.get("strengths")),

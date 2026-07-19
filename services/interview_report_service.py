@@ -53,6 +53,14 @@ def save_interview_report(
                         set
                           cv_jd_analysis_id = coalesce(%s, cv_jd_analysis_id),
                           job_id = coalesce(%s, job_id),
+                          company = coalesce(
+                            nullif(trim(company), ''),
+                            (
+                              select company_name
+                              from jobs
+                              where id = coalesce(%s, interview_sessions.job_id)
+                            )
+                          ),
                           position = %s,
                           status = 'completed',
                           ended_at = now(),
@@ -65,6 +73,7 @@ def save_interview_report(
                         """,
                         (
                             cv_jd_analysis_id,
+                            job_id,
                             job_id,
                             position,
                             max(0, int(duration_seconds or 0)),
@@ -82,6 +91,7 @@ def save_interview_report(
                           cv_jd_analysis_id,
                           job_id,
                           position,
+                          company,
                           session_type,
                           status,
                           started_at,
@@ -90,7 +100,11 @@ def save_interview_report(
                         overall_score,
                         context_json
                     )
-                    values (%s, %s, %s, %s, 'mixed', 'completed', now(), now(), %s, %s, %s)
+                    values (
+                      %s, %s, %s, %s,
+                      (select company_name from jobs where id = %s),
+                      'mixed', 'completed', now(), now(), %s, %s, %s
+                    )
                     returning *
                         """,
                         (
@@ -98,6 +112,7 @@ def save_interview_report(
                             cv_jd_analysis_id,
                             job_id,
                             position,
+                            job_id,
                             max(0, int(duration_seconds or 0)),
                             _score(overall_score),
                             Json({"code_interview": code_interview} if code_interview else {}),
