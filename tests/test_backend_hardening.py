@@ -2,6 +2,7 @@
 
 import inspect
 import os
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -11,8 +12,10 @@ os.environ.setdefault("CLERK_JWKS_URL", "https://example.com/.well-known/jwks.js
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from starlette.requests import ClientDisconnect
 
 from core.clerk_auth import ClerkUser, require_admin, verified_request_email
+from core.middleware import PayloadSizeLimitMiddleware
 from main import app
 from routers import database
 from schemas.analysis import ExtractCVJDRequest
@@ -96,6 +99,26 @@ class BackendHardeningTests(unittest.TestCase):
             response = self.client.get("/health/ready")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["database"], "unavailable")
+
+    def test_payload_middleware_handles_client_disconnect(self):
+        class DisconnectingRequest:
+            method = "POST"
+            headers = {}
+
+            class url:
+                path = "/api/test"
+
+            async def stream(self):
+                raise ClientDisconnect()
+                yield b""
+
+        middleware = PayloadSizeLimitMiddleware(app)
+        call_next = unittest.mock.AsyncMock()
+
+        response = asyncio.run(middleware.dispatch(DisconnectingRequest(), call_next))
+
+        self.assertEqual(response.status_code, 499)
+        call_next.assert_not_called()
 
 class DevelopmentQuotaTests(unittest.IsolatedAsyncioTestCase):
     async def test_development_bypasses_plan_and_realtime_duration_quotas(self):

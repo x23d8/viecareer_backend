@@ -10,7 +10,7 @@ import re
 
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.types import ASGIApp
 
 from config import CORS_ORIGIN_REGEX, CORS_ORIGINS
@@ -67,20 +67,32 @@ class PayloadSizeLimitMiddleware(BaseHTTPMiddleware):
         # Streaming check: buffer incrementally and abort early if oversized
         body_chunks: list[bytes] = []
         total = 0
-        async for chunk in request.stream():
-            total += len(chunk)
-            if total > max_bytes:
-                mb = max_bytes // (1024 * 1024)
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        "error": True,
-                        "code": "PAYLOAD_TOO_LARGE",
-                        "message": f"Request body must not exceed {mb} MB.",
-                        "retry": False,
-                    },
-                )
-            body_chunks.append(chunk)
+        try:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > max_bytes:
+                    mb = max_bytes // (1024 * 1024)
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "error": True,
+                            "code": "PAYLOAD_TOO_LARGE",
+                            "message": f"Request body must not exceed {mb} MB.",
+                            "retry": False,
+                        },
+                    )
+                body_chunks.append(chunk)
+        except ClientDisconnect:
+            logger.info("Client disconnected while sending request body: %s %s", request.method, path)
+            return JSONResponse(
+                status_code=499,
+                content={
+                    "error": True,
+                    "code": "CLIENT_DISCONNECTED",
+                    "message": "Client disconnected before the request body was fully received.",
+                    "retry": False,
+                },
+            )
 
         # Re-inject the body so downstream middleware/route can read it
         body = b"".join(body_chunks)
