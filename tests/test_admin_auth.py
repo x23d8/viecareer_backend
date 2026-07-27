@@ -63,6 +63,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertNotIn("data", response.json())
 
     def test_admin_endpoint_allows_admin_user(self):
+        FakeOverviewCursor.executed_queries.clear()
         self.authenticate_as("user")
         self.set_db_user(1)
         active_patch = patch("routers.admin.ensure_tracking_tables")
@@ -140,6 +141,9 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(payload["business_report"]["ever_paid_accounts"], 1)
         self.assertEqual(payload["business_report"]["all_time_api_cost_usd"], "0.250000")
         self.assertEqual(payload["business_report"]["feature_usage"][2]["total_uses"], 3)
+        overview_sql = "\n".join(FakeOverviewCursor.executed_queries)
+        self.assertIn("when 'usage_based' then 200", overview_sql)
+        self.assertNotIn("plan_id <> (select id from plans where code = 'usage_based')", overview_sql)
 
     def test_admin_routes_are_not_registered_twice(self):
         route_keys = [
@@ -292,6 +296,8 @@ class FakeOverviewConnection:
 
 
 class FakeOverviewCursor:
+    executed_queries: list[str] = []
+
     def __init__(self):
         self.fetchone_calls = 0
         self.fetchall_calls = 0
@@ -303,6 +309,7 @@ class FakeOverviewCursor:
         return False
 
     def execute(self, query, params=None):
+        self.executed_queries.append(query)
         return None
 
     def fetchone(self):

@@ -202,12 +202,27 @@ def get_admin_overview(
                 cur.execute(
                     """
                     with latest_subscription as (
-                      select distinct on (user_id) user_id, plan_id, status
-                      from user_subscriptions
-                      where status = 'active'
-                        and (end_at is null or end_at >= now())
-                        and plan_id <> (select id from plans where code = 'usage_based')
-                      order by user_id, start_at desc, id desc
+                      select distinct on (us.user_id)
+                        us.user_id,
+                        us.plan_id,
+                        us.status
+                      from user_subscriptions us
+                      join plans ranked_plan on ranked_plan.id = us.plan_id
+                      where us.status = 'active'
+                        and us.start_at <= now()
+                        and (us.end_at is null or us.end_at >= now())
+                      order by
+                        us.user_id,
+                        case ranked_plan.code
+                          when 'team' then 500
+                          when 'pro' then 400
+                          when 'standard' then 300
+                          when 'usage_based' then 200
+                          when 'free' then 100
+                          else 0
+                        end desc,
+                        us.start_at desc,
+                        us.id desc
                     )
                     select
                       count(u.*)::int as total_users,
@@ -224,12 +239,26 @@ def get_admin_overview(
                 cur.execute(
                     """
                     with latest_subscription as (
-                      select distinct on (user_id) user_id, plan_id
-                      from user_subscriptions
-                      where status = 'active'
-                        and (end_at is null or end_at >= now())
-                        and plan_id <> (select id from plans where code = 'usage_based')
-                      order by user_id, start_at desc, id desc
+                      select distinct on (us.user_id)
+                        us.user_id,
+                        us.plan_id
+                      from user_subscriptions us
+                      join plans ranked_plan on ranked_plan.id = us.plan_id
+                      where us.status = 'active'
+                        and us.start_at <= now()
+                        and (us.end_at is null or us.end_at >= now())
+                      order by
+                        us.user_id,
+                        case ranked_plan.code
+                          when 'team' then 500
+                          when 'pro' then 400
+                          when 'standard' then 300
+                          when 'usage_based' then 200
+                          when 'free' then 100
+                          else 0
+                        end desc,
+                        us.start_at desc,
+                        us.id desc
                     ),
                     effective_users as (
                       select
@@ -245,12 +274,15 @@ def get_admin_overview(
                       count(eu.user_id)::int as users,
                       (p.code <> 'free') as is_paid,
                       (
-                        count(eu.user_id)
-                        * coalesce(nullif(regexp_replace(p.monthly_price::text, '[^0-9.-]', '', 'g'), '')::numeric, 0)
+                        case
+                          when p.billing_period = 'usage' then 0
+                          else count(eu.user_id)
+                            * coalesce(nullif(regexp_replace(p.monthly_price::text, '[^0-9.-]', '', 'g'), '')::numeric, 0)
+                        end
                       ) as monthly_revenue
                     from plans p
                     left join effective_users eu on eu.plan_code = p.code
-                    group by p.code, p.name, p.monthly_price
+                    group by p.code, p.name, p.monthly_price, p.billing_period
                     order by
                       case when p.code = 'free' then 0 else 1 end,
                       p.code
@@ -2029,9 +2061,19 @@ def _user_base_query() -> str:
         join plans p on p.id = us.plan_id
         where us.user_id = u.id
           and us.status = 'active'
+          and us.start_at <= now()
           and (us.end_at is null or us.end_at >= now())
-          and p.code <> 'usage_based'
-        order by us.start_at desc
+        order by
+          case p.code
+            when 'team' then 500
+            when 'pro' then 400
+            when 'standard' then 300
+            when 'usage_based' then 200
+            when 'free' then 100
+            else 0
+          end desc,
+          us.start_at desc,
+          us.id desc
         limit 1
       ) plan_row on true
       left join plans free_plan on free_plan.code = 'free'

@@ -78,12 +78,13 @@ def build_admin_report_workbook(
         )
 
     if "overview" in pages and overview_data is not None:
-        for filename, rows, preferred_fields in _overview_files(overview_data):
+        for filename, rows, preferred_fields, range_applied in _overview_files(overview_data):
             add_sheet(
                 page="overview",
                 title=_sheet_title(filename),
                 rows=rows,
                 preferred_fields=preferred_fields,
+                range_applied=range_applied,
             )
 
     database_pages = {"users", "sessions", "activity", "feedback", "ai_costs"}.intersection(pages)
@@ -206,9 +207,9 @@ def _sheet_title(filename: str) -> str:
     titles = {
         "overview/kpis.csv": "Overview KPIs",
         "overview/business-summary.csv": "Business Summary",
-        "overview/paid-accounts-by-plan.csv": "Paid Accounts by Plan",
+        "overview/paid-accounts-by-plan.csv": "Ever-Paid Accounts by Plan",
         "overview/report-feature-usage.csv": "Report Feature Usage",
-        "overview/users-by-plan.csv": "Users by Plan",
+        "overview/users-by-plan.csv": "Current Users by Plan",
         "overview/function-metrics.csv": "Function Metrics",
         "overview/landing-summary.csv": "Landing Summary",
         "overview/landing-by-source.csv": "Landing by Source",
@@ -348,7 +349,7 @@ def _fetch_limited(cur, query: str, params: list[Any]) -> tuple[list[dict[str, A
     return rows[:MAX_EXPORT_ROWS], len(rows) > MAX_EXPORT_ROWS
 
 
-def _overview_files(data: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]], list[str]]]:
+def _overview_files(data: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]], list[str], bool]]:
     window = data.get("window") or {}
     window_values = {
         "date_from": window.get("date_from"),
@@ -366,14 +367,17 @@ def _overview_files(data: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]
         if key not in {"scope", "ever_paid_accounts_by_plan", "feature_usage"}
     ]
     paid_accounts_by_plan = [
-        {**window_values, **dict(row)}
+        {"scope": "all_time", **dict(row)}
         for row in business.get("ever_paid_accounts_by_plan") or []
     ]
     report_feature_usage = [
         {**window_values, **dict(row)}
         for row in business.get("feature_usage") or []
     ]
-    users_by_plan = [{**window_values, **dict(row)} for row in data.get("users_by_plan") or []]
+    users_by_plan = [
+        {"scope": "current_at_export", **dict(row)}
+        for row in data.get("users_by_plan") or []
+    ]
     function_metrics = [{**window_values, **dict(row)} for row in data.get("function_metrics") or []]
     landing = data.get("landing_metrics") or {}
     landing_summary = [
@@ -388,18 +392,18 @@ def _overview_files(data: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]
     revenue_trend = [{**window_values, **dict(row)} for row in (charts.get("revenue") or charts.get("revenue_by_month") or [])]
 
     return [
-        ("overview/kpis.csv", kpi_rows, ["date_from", "date_to", "group_by", "metric", "value"]),
-        ("overview/business-summary.csv", business_summary, ["date_from", "date_to", "group_by", "metric", "value"]),
-        ("overview/paid-accounts-by-plan.csv", paid_accounts_by_plan, ["date_from", "date_to", "group_by", "plan_code", "plan_name", "paid_accounts"]),
-        ("overview/report-feature-usage.csv", report_feature_usage, ["date_from", "date_to", "group_by", "feature_key", "label", "total_uses"]),
-        ("overview/users-by-plan.csv", users_by_plan, ["date_from", "date_to", "group_by", "plan_code", "plan_name", "users", "is_paid", "monthly_revenue"]),
-        ("overview/function-metrics.csv", function_metrics, ["date_from", "date_to", "group_by", "feature_key", "label", "description", "kind", "events", "active_users", "ai_calls", "completions", "total_tokens", "total_cost_usd"]),
-        ("overview/landing-summary.csv", landing_summary, ["date_from", "date_to", "group_by", "metric", "value"]),
-        ("overview/landing-by-source.csv", landing_sources, ["date_from", "date_to", "group_by", "source", "landing_views", "pricing_clicks", "signup_clicks", "login_clicks", "unique_visitors"]),
-        ("overview/landing-trend.csv", landing_trend, ["date_from", "date_to", "group_by", "period"]),
-        ("overview/feature-trend.csv", feature_trend, ["date_from", "date_to", "group_by", "period"]),
-        ("overview/ai-cost-trend.csv", ai_cost_trend, ["date_from", "date_to", "group_by", "period", "total_cost_usd"]),
-        ("overview/revenue-trend.csv", revenue_trend, ["date_from", "date_to", "group_by", "period", "revenue"]),
+        ("overview/kpis.csv", kpi_rows, ["date_from", "date_to", "group_by", "metric", "value"], True),
+        ("overview/business-summary.csv", business_summary, ["date_from", "date_to", "group_by", "metric", "value"], True),
+        ("overview/paid-accounts-by-plan.csv", paid_accounts_by_plan, ["scope", "plan_code", "plan_name", "paid_accounts"], False),
+        ("overview/report-feature-usage.csv", report_feature_usage, ["date_from", "date_to", "group_by", "feature_key", "label", "total_uses"], True),
+        ("overview/users-by-plan.csv", users_by_plan, ["scope", "plan_code", "plan_name", "users", "is_paid", "monthly_revenue"], False),
+        ("overview/function-metrics.csv", function_metrics, ["date_from", "date_to", "group_by", "feature_key", "label", "description", "kind", "events", "active_users", "ai_calls", "completions", "total_tokens", "total_cost_usd"], True),
+        ("overview/landing-summary.csv", landing_summary, ["date_from", "date_to", "group_by", "metric", "value"], True),
+        ("overview/landing-by-source.csv", landing_sources, ["date_from", "date_to", "group_by", "source", "landing_views", "pricing_clicks", "signup_clicks", "login_clicks", "unique_visitors"], True),
+        ("overview/landing-trend.csv", landing_trend, ["date_from", "date_to", "group_by", "period"], True),
+        ("overview/feature-trend.csv", feature_trend, ["date_from", "date_to", "group_by", "period"], True),
+        ("overview/ai-cost-trend.csv", ai_cost_trend, ["date_from", "date_to", "group_by", "period", "total_cost_usd"], True),
+        ("overview/revenue-trend.csv", revenue_trend, ["date_from", "date_to", "group_by", "period", "revenue"], True),
     ]
 
 
@@ -440,7 +444,7 @@ def _export_users(cur, plan_filter: str = "all") -> tuple[list[dict[str, Any]], 
           case
             when subscription.plan_code is not null
               and subscription.plan_code <> 'free'
-              and subscription.subscription_status = 'active'
+              and subscription.subscription_is_current
             then 'Paid'
             else 'Free'
           end as plan_category,
@@ -489,6 +493,11 @@ def _export_users(cur, plan_filter: str = "all") -> tuple[list[dict[str, Any]], 
             p.quota_total,
             p.rate_limit_per_minute,
             us.status as subscription_status,
+            (
+              us.status = 'active'
+              and us.start_at <= now()
+              and (us.end_at is null or us.end_at >= now())
+            ) as subscription_is_current,
             us.start_at,
             us.end_at,
             us.auto_renew,
@@ -496,7 +505,22 @@ def _export_users(cur, plan_filter: str = "all") -> tuple[list[dict[str, Any]], 
           from user_subscriptions us
           join plans p on p.id = us.plan_id
           where us.user_id = u.id
-          order by (us.status = 'active') desc, us.start_at desc, us.id desc
+          order by
+            (
+              us.status = 'active'
+              and us.start_at <= now()
+              and (us.end_at is null or us.end_at >= now())
+            ) desc,
+            case p.code
+              when 'team' then 500
+              when 'pro' then 400
+              when 'standard' then 300
+              when 'usage_based' then 200
+              when 'free' then 100
+              else 0
+            end desc,
+            us.start_at desc,
+            us.id desc
           limit 1
         ) subscription on true
         left join lateral (
@@ -545,7 +569,7 @@ def _export_users(cur, plan_filter: str = "all") -> tuple[list[dict[str, Any]], 
           or case
             when subscription.plan_code is not null
               and subscription.plan_code <> 'free'
-              and subscription.subscription_status = 'active'
+              and subscription.subscription_is_current
             then 'paid'
             else 'free'
           end = %s
@@ -821,7 +845,7 @@ def _export_user_feedback_summary(cur, plan_filter: str = "all") -> tuple[list[d
           case
             when subscription.plan_code is not null
               and subscription.plan_code <> 'free'
-              and subscription.subscription_status = 'active'
+              and subscription.subscription_is_current
             then 'Paid'
             else 'Free'
           end as plan_category,
@@ -849,11 +873,31 @@ def _export_user_feedback_summary(cur, plan_filter: str = "all") -> tuple[list[d
           select
             p.code as plan_code,
             p.name as plan_name,
-            us.status as subscription_status
+            us.status as subscription_status,
+            (
+              us.status = 'active'
+              and us.start_at <= now()
+              and (us.end_at is null or us.end_at >= now())
+            ) as subscription_is_current
           from user_subscriptions us
           join plans p on p.id = us.plan_id
           where us.user_id = u.id
-          order by (us.status = 'active') desc, us.start_at desc, us.id desc
+          order by
+            (
+              us.status = 'active'
+              and us.start_at <= now()
+              and (us.end_at is null or us.end_at >= now())
+            ) desc,
+            case p.code
+              when 'team' then 500
+              when 'pro' then 400
+              when 'standard' then 300
+              when 'usage_based' then 200
+              when 'free' then 100
+              else 0
+            end desc,
+            us.start_at desc,
+            us.id desc
           limit 1
         ) subscription on true
         left join lateral (
@@ -884,7 +928,7 @@ def _export_user_feedback_summary(cur, plan_filter: str = "all") -> tuple[list[d
           or case
             when subscription.plan_code is not null
               and subscription.plan_code <> 'free'
-              and subscription.subscription_status = 'active'
+              and subscription.subscription_is_current
             then 'paid'
             else 'free'
           end = %s
@@ -915,7 +959,7 @@ def _export_feedback(
           case
             when subscription.plan_code is not null
               and subscription.plan_code <> 'free'
-              and subscription.subscription_status = 'active'
+              and subscription.subscription_is_current
             then 'Paid'
             else 'Free'
           end as plan_category,
@@ -943,11 +987,31 @@ def _export_feedback(
           select
             p.code as plan_code,
             p.name as plan_name,
-            us.status as subscription_status
+            us.status as subscription_status,
+            (
+              us.status = 'active'
+              and us.start_at <= now()
+              and (us.end_at is null or us.end_at >= now())
+            ) as subscription_is_current
           from user_subscriptions us
           join plans p on p.id = us.plan_id
           where us.user_id = u.id
-          order by (us.status = 'active') desc, us.start_at desc, us.id desc
+          order by
+            (
+              us.status = 'active'
+              and us.start_at <= now()
+              and (us.end_at is null or us.end_at >= now())
+            ) desc,
+            case p.code
+              when 'team' then 500
+              when 'pro' then 400
+              when 'standard' then 300
+              when 'usage_based' then 200
+              when 'free' then 100
+              else 0
+            end desc,
+            us.start_at desc,
+            us.id desc
           limit 1
         ) subscription on true
         where coalesce(f.updated_at, f.created_at) >= %s
@@ -957,7 +1021,7 @@ def _export_feedback(
             or case
               when subscription.plan_code is not null
                 and subscription.plan_code <> 'free'
-                and subscription.subscription_status = 'active'
+                and subscription.subscription_is_current
               then 'paid'
               else 'free'
             end = %s
@@ -993,7 +1057,7 @@ def _export_user_reports(
           case
             when subscription.plan_code is not null
               and subscription.plan_code <> 'free'
-              and subscription.subscription_status = 'active'
+              and subscription.subscription_is_current
             then 'Paid'
             else 'Free'
           end as plan_category,
@@ -1008,11 +1072,31 @@ def _export_user_reports(
           select
             p.code as plan_code,
             p.name as plan_name,
-            us.status as subscription_status
+            us.status as subscription_status,
+            (
+              us.status = 'active'
+              and us.start_at <= now()
+              and (us.end_at is null or us.end_at >= now())
+            ) as subscription_is_current
           from user_subscriptions us
           join plans p on p.id = us.plan_id
           where us.user_id = u.id
-          order by (us.status = 'active') desc, us.start_at desc, us.id desc
+          order by
+            (
+              us.status = 'active'
+              and us.start_at <= now()
+              and (us.end_at is null or us.end_at >= now())
+            ) desc,
+            case p.code
+              when 'team' then 500
+              when 'pro' then 400
+              when 'standard' then 300
+              when 'usage_based' then 200
+              when 'free' then 100
+              else 0
+            end desc,
+            us.start_at desc,
+            us.id desc
           limit 1
         ) subscription on true
         where r.created_at >= %s
@@ -1022,7 +1106,7 @@ def _export_user_reports(
             or case
               when subscription.plan_code is not null
                 and subscription.plan_code <> 'free'
-                and subscription.subscription_status = 'active'
+                and subscription.subscription_is_current
               then 'paid'
               else 'free'
             end = %s

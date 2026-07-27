@@ -125,7 +125,8 @@ class AdminReportExportTests(unittest.TestCase):
         self.assertEqual(workbook.sheetnames[0], "Export Guide")
         self.assertIn("Overview KPIs", workbook.sheetnames)
         self.assertIn("Business Summary", workbook.sheetnames)
-        self.assertIn("Paid Accounts by Plan", workbook.sheetnames)
+        self.assertIn("Ever-Paid Accounts by Plan", workbook.sheetnames)
+        self.assertIn("Current Users by Plan", workbook.sheetnames)
         self.assertIn("Report Feature Usage", workbook.sheetnames)
         self.assertIn("Function Metrics", workbook.sheetnames)
         kpis = workbook["Overview KPIs"]
@@ -134,6 +135,24 @@ class AdminReportExportTests(unittest.TestCase):
         values = [[cell.value for cell in row] for row in kpis.iter_rows()]
         self.assertTrue(any("total_users" in row for row in values))
         self.assertTrue(any(12 in row for row in values))
+
+        guide = workbook["Export Guide"]
+        guide_rows = list(guide.iter_rows(min_row=2, values_only=True))
+        plan_scope_rows = {
+            row[2]: row
+            for row in guide_rows
+            if row[2] in {"Ever-Paid Accounts by Plan", "Current Users by Plan"}
+        }
+        self.assertFalse(plan_scope_rows["Ever-Paid Accounts by Plan"][6])
+        self.assertFalse(plan_scope_rows["Current Users by Plan"][6])
+
+        ever_paid = workbook["Ever-Paid Accounts by Plan"]
+        self.assertEqual(ever_paid["A1"].value, "Scope")
+        self.assertEqual(ever_paid["A2"].value, "all_time")
+
+        current_plans = workbook["Current Users by Plan"]
+        self.assertEqual(current_plans["A1"].value, "Scope")
+        self.assertEqual(current_plans["A2"].value, "current_at_export")
 
 
 if __name__ == "__main__":
