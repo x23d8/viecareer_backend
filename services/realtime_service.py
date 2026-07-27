@@ -37,16 +37,11 @@ from services.interview_ai_service import (
     score_live_answer,
     transcribe_push_to_talk_audio,
 )
-from services.plan_quota_service import (
-    FEATURE_REALTIME_INTERVIEW,
-    METRIC_SESSION_COUNT,
-    check_plan_quota,
-    get_realtime_session_limit_seconds,
-)
 from services.realtime_transcript_service import (
     complete_live_interview_session,
     complete_live_interview_session_for_user,
     create_live_interview_session,
+    get_live_interview_duration_limit,
     save_realtime_qa_pair,
     save_realtime_transcript_event,
 )
@@ -284,29 +279,29 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
             state.blueprint = _coerce_blueprint(state.metadata.get("blueprint"))
 
             try:
-                await check_plan_quota(
-                    external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id or "",
-                    feature_code=FEATURE_REALTIME_INTERVIEW,
-                    metric=METRIC_SESSION_COUNT,
-                )
-                state.max_duration_seconds = await get_realtime_session_limit_seconds(
-                    external_auth_id=state.metadata.get("external_auth_id") or state.auth_external_id or "",
-                )
+                state.session_id = await asyncio.to_thread(create_live_interview_session, state.metadata)
             except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else None
                 await _send_client_error(
                     websocket,
                     _http_exception_message(exc),
-                    code="PLAN_QUOTA_EXCEEDED",
-                    detail=exc.detail if isinstance(exc.detail, dict) else None,
+                    code=str((detail or {}).get("code") or "INTERVIEW_ATTEMPTS_EXHAUSTED"),
+                    detail=detail,
                 )
-                await openai_ws.close(code=1008, reason="Plan quota exceeded")
+                await openai_ws.close(code=1008, reason="Interview attempts exhausted")
                 return
-
-            state.session_id = await asyncio.to_thread(_create_live_session_safe, state.metadata)
             if not state.session_id:
                 await _send_client_error(websocket, "Could not persist realtime interview context")
                 await openai_ws.close(code=1011, reason="Session persistence failed")
                 return
+            state.max_duration_seconds = await asyncio.to_thread(
+                get_live_interview_duration_limit,
+                state.session_id,
+            )
+            if state.max_duration_seconds:
+                effective_minutes = state.max_duration_seconds // 60
+                state.metadata["duration_minutes"] = effective_minutes
+                state.blueprint["durationMinutes"] = effective_minutes
 
             state.initialized = True
             state.session_started_at = time.monotonic()
@@ -623,8 +618,8 @@ async def _enforce_realtime_time_limit(websocket: WebSocket, openai_ws, state: _
         _track_realtime_session_estimate(state, duration_seconds)
         await _send_client_error(
             websocket,
-            "Realtime interview time limit reached for your current plan.",
-            code="PLAN_QUOTA_TIME_LIMIT",
+            "The selected interview duration has ended.",
+            code="INTERVIEW_DURATION_REACHED",
             detail={
                 "max_duration_seconds": state.max_duration_seconds,
                 "max_duration_minutes": _minutes_from_seconds(state.max_duration_seconds),
@@ -758,6 +753,7 @@ def _realtime_session_config(
     position = str((metadata or {}).get("position") or "").strip()
     language = str((metadata or {}).get("language") or "en").strip().lower()
     interview_style = str((metadata or {}).get("interview_style") or "mixed").strip()
+    duration_minutes = max(1, int((metadata or {}).get("duration_minutes") or 20))
     blueprint_context = _blueprint_context(blueprint, direct_conversation=create_response)
     language_directive = (
         "Conduct the entire interview in Vietnamese. Do not switch languages unless the candidate explicitly asks."
@@ -782,6 +778,11 @@ def _realtime_session_config(
                 _candidate_context(metadata),
                 f"Interview language directive: {language_directive}",
                 f"Interview style directive: {style_hint}",
+                (
+                    f"Interview duration directive: finish within {duration_minutes} minutes. "
+                    "Keep greetings, acknowledgements, answers, and transitions concise enough "
+                    "to cover the configured question set before the timer ends."
+                ),
                 blueprint_context,
             ]
             if part

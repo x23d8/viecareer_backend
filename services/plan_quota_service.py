@@ -92,29 +92,31 @@ _DEFAULT_PLANS: tuple[tuple[str, str, str, int, int, str, int], ...] = (
 
 _DEFAULT_LIMITS: tuple[tuple[str, str, str, str, int | None], ...] = (
     ("free", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "month", 3),
-    ("free", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 2),
+    ("free", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 3),
     ("free", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 10),
     ("free", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "day", 10),
     ("free", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "day", 2),
+    ("free", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "month", 2),
     ("standard", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "month", 15),
     ("standard", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 10),
     ("standard", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 25),
     ("standard", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "day", 50),
     ("standard", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "day", 10),
+    ("standard", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "month", 10),
     ("pro", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "month", 30),
     ("pro", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 20),
     ("pro", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 45),
     ("pro", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "day", 150),
     ("pro", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "day", 15),
+    ("pro", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "month", 15),
     ("team", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "month", 30),
     ("team", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 20),
     ("team", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 45),
     ("team", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "day", 150),
     ("team", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "day", 15),
-    ("usage_based", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "purchase", 1),
+    ("team", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "month", 15),
     ("usage_based", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "purchase", 1),
     ("usage_based", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 15),
-    ("usage_based", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "purchase", 1),
 )
 
 _API_USAGE_FEATURES: dict[tuple[str, str], tuple[str, ...]] = {
@@ -122,19 +124,18 @@ _API_USAGE_FEATURES: dict[tuple[str, str], tuple[str, ...]] = {
     (FEATURE_CV_JD_ANALYSIS, METRIC_ATTEMPT_COUNT): ("cvjd_extract",),
     (FEATURE_CHATBOT, METRIC_MESSAGE_COUNT): ("chat_viebot",),
     (FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT): ("coding_plan",),
+    (FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT): ("coding_feedback",),
 }
 
 _USAGE_BASED_FEATURES = {
-    FEATURE_CV_JD_ANALYSIS,
     FEATURE_REALTIME_INTERVIEW,
-    FEATURE_AI_CODE_FEEDBACK,
 }
 
 _QUOTA_SUMMARY_FEATURES: tuple[tuple[str, str], ...] = (
-    (FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT),
     (FEATURE_CV_JD_ANALYSIS, METRIC_COUNT),
     (FEATURE_CHATBOT, METRIC_MESSAGE_COUNT),
     (FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT),
+    (FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT),
 )
 
 _PLAN_PRIORITY = {
@@ -404,6 +405,24 @@ def _seed_plans(cur) -> None:
 
 
 def _seed_limits(cur) -> None:
+    cur.execute(
+        """
+        delete from plan_feature_limits l
+        using plans p
+        where l.plan_id = p.id
+          and p.code = %s
+          and not (
+            l.feature_code = %s
+            and l.metric in (%s, %s)
+          )
+        """,
+        (
+            PLAN_USAGE_BASED,
+            FEATURE_REALTIME_INTERVIEW,
+            METRIC_SESSION_COUNT,
+            METRIC_SESSION_MINUTES,
+        ),
+    )
     for plan_code, feature_code, metric, period, limit_value in _DEFAULT_LIMITS:
         cur.execute(
             """
@@ -566,22 +585,15 @@ def _api_usage_count(
 
 
 def _realtime_session_count(cur, external_auth_id: str, window_start: datetime | None) -> int:
-    # Only persisted realtime sessions with at least one completed Q&A consume
-    # quota. Empty handshakes, Strict Mode reconnects, and abandoned setup
-    # attempts must not burn a user's monthly allowance.
+    # Kept for compatibility with plan reports. Attempts are consumed at session
+    # creation and never restored on cancellation.
     cur.execute(
         """
         select count(*)::int as used
         from interview_sessions s
         join users u on u.id = s.user_id
         where u.external_auth_id = %s
-          and s.context_json is not null
-          and s.status in ('in_progress', 'completed')
-          and exists (
-            select 1
-            from interview_qa_pairs q
-            where q.session_id = s.id
-          )
+          and s.attempt_consumed = true
           and (%s::timestamptz is null or s.created_at >= %s)
         """,
         (external_auth_id, window_start, window_start),

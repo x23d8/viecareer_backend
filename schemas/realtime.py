@@ -49,6 +49,7 @@ class RealtimeSessionMetadata(BaseModel):
     show_transcript: bool = REALTIME_SHOW_TRANSCRIPT
     blueprint: dict[str, Any]
     interview_style: InterviewStyle = "mixed"
+    duration_minutes: int = Field(default=20, ge=5, le=60)
 
     @model_validator(mode="before")
     @classmethod
@@ -145,6 +146,17 @@ class RealtimeSessionMetadata(BaseModel):
         questions = value.get("questions")
         if not isinstance(questions, list) or not questions:
             raise ValueError("blueprint.questions must contain at least one question")
+        if len(questions) > 20:
+            raise ValueError("blueprint.questions cannot contain more than 20 questions")
+        question_ids = [
+            str(question.get("id") or "").strip()
+            for question in questions
+            if isinstance(question, dict)
+        ]
+        if len(question_ids) != len(questions) or any(not question_id for question_id in question_ids):
+            raise ValueError("every blueprint question must have an id")
+        if len(set(question_ids)) != len(question_ids):
+            raise ValueError("blueprint question ids must be unique")
         return value
 
 

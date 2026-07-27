@@ -25,6 +25,7 @@ from core.rate_limit import limiter
 from schemas.admin import AdminReportExportRequest, AdminUserStatusRequest
 from schemas.events import LandingMetricGroupBy, LandingSource
 from services.admin_report_export_service import build_admin_report_workbook
+from services.billing_service import reconcile_pending_payos_payments
 from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics as get_feature_metrics_service
 from services.landing_event_service import ensure_landing_events_schema, get_landing_metrics
 
@@ -205,6 +206,7 @@ def get_admin_overview(
                       from user_subscriptions
                       where status = 'active'
                         and (end_at is null or end_at >= now())
+                        and plan_id <> (select id from plans where code = 'usage_based')
                       order by user_id, start_at desc, id desc
                     )
                     select
@@ -226,6 +228,7 @@ def get_admin_overview(
                       from user_subscriptions
                       where status = 'active'
                         and (end_at is null or end_at >= now())
+                        and plan_id <> (select id from plans where code = 'usage_based')
                       order by user_id, start_at desc, id desc
                     ),
                     effective_users as (
@@ -312,6 +315,115 @@ def get_admin_overview(
 
                 cur.execute(
                     """
+                    with activated_users as (
+                      select user_id from user_activity_events
+                      where user_id is not null and success = true
+                      union
+                      select user_id from api_usage_logs
+                      where user_id is not null and status = 'success'
+                      union
+                      select user_id from cv_jd_analyses
+                      where user_id is not null
+                      union
+                      select user_id from interview_sessions
+                      where user_id is not null
+                    ),
+                    ever_paid_users as (
+                      select distinct user_id
+                      from payment_transactions
+                      where user_id is not null and status = 'paid'
+                    )
+                    select
+                      (select count(*)::int from users) as registered_accounts,
+                      (select count(*)::int from activated_users) as activated_accounts,
+                      (select count(*)::int from ever_paid_users) as ever_paid_accounts,
+                      (select coalesce(sum(cost_usd), 0) from api_usage_logs) as all_time_api_cost_usd
+                    """
+                )
+                account_report = dict(cur.fetchone() or {})
+
+                cur.execute(
+                    """
+                    select
+                      p.code as plan_code,
+                      p.name as plan_name,
+                      count(distinct pt.user_id)::int as paid_accounts
+                    from plans p
+                    left join payment_transactions pt
+                      on pt.plan_id = p.id
+                     and pt.status = 'paid'
+                     and pt.user_id is not null
+                    where p.code <> 'free'
+                    group by p.code, p.name
+                    order by
+                      case p.code
+                        when 'standard' then 1
+                        when 'pro' then 2
+                        when 'team' then 3
+                        when 'usage_based' then 4
+                        else 5
+                      end,
+                      p.code
+                    """
+                )
+                ever_paid_by_plan = [
+                    {
+                        "plan_code": row["plan_code"],
+                        "plan_name": row["plan_name"],
+                        "paid_accounts": int(row.get("paid_accounts") or 0),
+                    }
+                    for row in cur.fetchall()
+                ]
+
+                cur.execute(
+                    """
+                    select 'cv_jd_analysis'::text as feature_key,
+                           'CV/JD Analysis'::text as label,
+                           count(*)::int as total_uses
+                    from cv_jd_analyses
+                    where created_at >= %s and created_at < %s
+                      and coalesce(llm_raw_json->>'synthetic', 'false') <> 'true'
+                    union all
+                    select 'ai_interview', 'AI Interview', count(*)::int
+                    from interview_sessions
+                    where created_at >= %s and created_at < %s
+                      and coalesce(session_type, '') <> 'coding'
+                    union all
+                    select 'coding_interview', 'Coding Interview', count(*)::int
+                    from api_usage_logs
+                    where occurred_at >= %s and occurred_at < %s
+                      and feature = 'coding_plan'
+                      and status = 'success'
+                    union all
+                    select 'personalized_action_plan', 'Personalized Action Plan', count(*)::int
+                    from user_activity_events
+                    where occurred_at >= %s and occurred_at < %s
+                      and event_name = 'action_plan_generated'
+                      and success = true
+                    """
+                    ,
+                    (
+                        start_at,
+                        end_at,
+                        start_at,
+                        end_at,
+                        start_at,
+                        end_at,
+                        start_at,
+                        end_at,
+                    ),
+                )
+                report_feature_usage = [
+                    {
+                        "feature_key": row["feature_key"],
+                        "label": row["label"],
+                        "total_uses": int(row.get("total_uses") or 0),
+                    }
+                    for row in cur.fetchall()
+                ]
+
+                cur.execute(
+                    """
                     select
                       date_trunc(%s, occurred_at)::date as period,
                       coalesce(sum(cost_usd), 0) as total_cost_usd
@@ -389,11 +501,26 @@ def get_admin_overview(
             "dashboard": feature_metrics,
             "feature_metrics": feature_metrics,
             "function_metrics": feature_metrics["features"],
+            "business_report": {
+                "scope": {
+                    "account_totals": "all_time",
+                    "landing_feature_usage_and_period_cost": "selected_date_range",
+                },
+                "landing_page_visits": int((landing.get("summary") or {}).get("landing_views") or 0),
+                "registered_accounts": int(account_report.get("registered_accounts") or 0),
+                "activated_accounts": int(account_report.get("activated_accounts") or 0),
+                "ever_paid_accounts": int(account_report.get("ever_paid_accounts") or 0),
+                "ever_paid_accounts_by_plan": ever_paid_by_plan,
+                "feature_usage": report_feature_usage,
+                "period_api_cost_usd": _money(ai_totals.get("total_ai_cost_usd")),
+                "all_time_api_cost_usd": _money(account_report.get("all_time_api_cost_usd")),
+            },
             "charts": {
                 "landing_visits": landing["trend"],
                 "feature_trend": feature_metrics["trend"],
                 "ai_cost_by_day": ai_cost_by_day,
                 "revenue": revenue_trend,
+                "revenue_by_month": revenue_trend,
             },
         }
     }
@@ -593,13 +720,15 @@ def list_admin_payments(
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     status_filter: PaymentStatus | None = Query(default=None, alias="status"),
+    plan: str | None = Query(default=None, max_length=50),
+    group_by: GroupBy = Query(default="day"),
     current_admin: AdminUser = Depends(require_admin),
 ):
     del current_admin
     if date_from and date_to and date_from > date_to:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="date_from must be on or before date_to.")
 
-    where_sql, params = _payment_filters(search, date_from, date_to, status_filter)
+    where_sql, params = _payment_filters(search, date_from, date_to, status_filter, plan)
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -610,9 +739,14 @@ def list_admin_payments(
                       count(*) filter (where pt.status = 'paid')::int as success,
                       count(*) filter (where pt.status = 'pending')::int as pending,
                       count(*) filter (where pt.status in ('failed', 'cancelled', 'expired'))::int as failed,
-                      coalesce(sum(pt.amount_vnd) filter (where pt.status = 'paid'), 0) as total_revenue_vnd
+                      count(distinct pt.user_id) filter (where pt.status = 'paid')::int as paying_customers,
+                      count(*) filter (where pt.status = 'paid' and p.code = 'usage_based')::int as usage_based_purchases,
+                      coalesce(sum(pt.amount_vnd) filter (where pt.status = 'paid'), 0) as total_revenue_vnd,
+                      coalesce(sum(pt.amount_vnd) filter (where pt.status = 'pending'), 0) as pending_value_vnd,
+                      coalesce(sum(pt.amount_vnd) filter (where pt.status in ('failed', 'cancelled', 'expired')), 0) as failed_value_vnd
                     from payment_transactions pt
                     join users u on u.id = pt.user_id
+                    join plans p on p.id = pt.plan_id
                     {where_sql}
                     """,
                     params,
@@ -627,6 +761,7 @@ def list_admin_payments(
                       u.email,
                       u.full_name,
                       pt.plan_id,
+                      pt.subscription_id,
                       p.code as plan_code,
                       p.name as plan_name,
                       pt.provider,
@@ -637,6 +772,10 @@ def list_admin_payments(
                       pt.status,
                       pt.description,
                       pt.paid_at,
+                      pt.period_start,
+                      pt.period_end,
+                      pt.cancelled_at,
+                      pt.expired_at,
                       pt.created_at,
                       pt.updated_at
                     from payment_transactions pt
@@ -649,6 +788,60 @@ def list_admin_payments(
                     [*params, limit, offset],
                 )
                 items = [_admin_payment_payload(row) for row in cur.fetchall()]
+
+                cur.execute(
+                    f"""
+                    select
+                      p.code as plan_code,
+                      p.name as plan_name,
+                      count(*)::int as attempts,
+                      count(*) filter (where pt.status = 'paid')::int as paid,
+                      count(*) filter (where pt.status = 'pending')::int as pending,
+                      count(*) filter (where pt.status in ('failed', 'cancelled', 'expired'))::int as failed,
+                      coalesce(sum(pt.amount_vnd) filter (where pt.status = 'paid'), 0) as revenue_vnd
+                    from payment_transactions pt
+                    join users u on u.id = pt.user_id
+                    join plans p on p.id = pt.plan_id
+                    {where_sql}
+                    group by p.code, p.name
+                    order by revenue_vnd desc, attempts desc, p.code
+                    """,
+                    params,
+                )
+                by_plan = [
+                    {
+                        **dict(row),
+                        "revenue_vnd": int(row.get("revenue_vnd") or 0),
+                        "revenue_usd": _usd_from_vnd(row.get("revenue_vnd")),
+                    }
+                    for row in cur.fetchall()
+                ]
+
+                cur.execute(
+                    f"""
+                    select
+                      date_trunc(%s, coalesce(pt.paid_at, pt.created_at))::date as period,
+                      count(*) filter (where pt.status = 'paid')::int as paid,
+                      count(*) filter (where pt.status = 'pending')::int as pending,
+                      count(*) filter (where pt.status in ('failed', 'cancelled', 'expired'))::int as failed,
+                      coalesce(sum(pt.amount_vnd) filter (where pt.status = 'paid'), 0) as revenue_vnd
+                    from payment_transactions pt
+                    join users u on u.id = pt.user_id
+                    join plans p on p.id = pt.plan_id
+                    {where_sql}
+                    group by period
+                    order by period asc
+                    """,
+                    [group_by, *params],
+                )
+                trend = [
+                    {
+                        **dict(row),
+                        "revenue_vnd": int(row.get("revenue_vnd") or 0),
+                        "revenue_usd": _usd_from_vnd(row.get("revenue_vnd")),
+                    }
+                    for row in cur.fetchall()
+                ]
     except Exception as exc:
         logger.exception("Could not load admin payments")
         raise HTTPException(
@@ -657,21 +850,47 @@ def list_admin_payments(
         ) from exc
 
     total = int(stats.get("total") or 0)
+    success_count = int(stats.get("success") or 0)
     total_revenue_vnd = int(stats.get("total_revenue_vnd") or 0)
     return {
         "data": {
             "stats": {
                 "total": total,
-                "success": int(stats.get("success") or 0),
+                "success": success_count,
                 "pending": int(stats.get("pending") or 0),
                 "failed": int(stats.get("failed") or 0),
+                "paying_customers": int(stats.get("paying_customers") or 0),
+                "usage_based_purchases": int(stats.get("usage_based_purchases") or 0),
+                "conversion_rate": round((success_count / total) * 100, 1) if total else 0,
                 "total_revenue_vnd": total_revenue_vnd,
                 "total_revenue_usd": _usd_from_vnd(total_revenue_vnd),
+                "pending_value_vnd": int(stats.get("pending_value_vnd") or 0),
+                "failed_value_vnd": int(stats.get("failed_value_vnd") or 0),
             },
             "items": items,
+            "by_plan": by_plan,
+            "trend": trend,
             "pagination": {"limit": limit, "offset": offset, "total": total},
         }
     }
+
+
+@router.post("/payments/reconcile")
+@limiter.limit("6/minute")
+async def reconcile_admin_payments(
+    request: Request,
+    limit: int = Query(25, ge=1, le=100),
+    current_admin: AdminUser = Depends(require_admin),
+):
+    del request, current_admin
+    try:
+        return {"data": await reconcile_pending_payos_payments(limit=limit)}
+    except Exception as exc:
+        logger.exception("Could not reconcile pending payments")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not reconcile pending payments with payOS.",
+        ) from exc
 
 
 @router.get("/users/{user_id}/metrics")
@@ -701,6 +920,7 @@ def get_user_metrics(
                 model_costs = _fetch_user_model_costs(cur, days, internal_user_id, external_auth_id)
                 recent_events = _fetch_user_recent_events(cur, internal_user_id, external_auth_id)
                 summary = _fetch_user_summary(cur, days, internal_user_id, external_auth_id, features)
+                payments = _fetch_user_payment_metrics(cur, internal_user_id)
     except HTTPException:
         raise
     except Exception as exc:
@@ -718,6 +938,7 @@ def get_user_metrics(
             "trend": trend,
             "model_costs": model_costs,
             "recent_events": recent_events,
+            "payments": payments,
         }
     }
 
@@ -1784,10 +2005,21 @@ def _user_base_query() -> str:
         coalesce(plan_row.quota_total, free_plan.quota_total, 0) as plan_quota_total,
         coalesce(plan_row.rate_limit_per_minute, free_plan.rate_limit_per_minute, 0) as plan_rate_limit_per_minute,
         coalesce(session_row.total_sessions, 0) as total_sessions,
+        coalesce(session_row.completed_sessions, 0) as completed_sessions,
+        session_row.average_session_score,
+        coalesce(analysis_row.cv_jd_analyses, 0) as cv_jd_analyses,
         coalesce(usage_row.ai_calls, 0) as ai_calls,
         coalesce(usage_row.total_tokens, 0) as total_tokens,
         coalesce(usage_row.total_cost_usd, 0) as total_cost_usd,
-        coalesce(activity_row.activity_events, 0) as activity_events
+        coalesce(activity_row.activity_events, 0) as activity_events,
+        activity_row.last_event_at,
+        coalesce(payment_row.payment_attempts, 0) as payment_attempts,
+        coalesce(payment_row.paid_transactions, 0) as paid_transactions,
+        coalesce(payment_row.pending_transactions, 0) as pending_transactions,
+        coalesce(payment_row.failed_transactions, 0) as failed_transactions,
+        coalesce(payment_row.usage_based_purchases, 0) as usage_based_purchases,
+        coalesce(payment_row.total_paid_vnd, 0) as total_paid_vnd,
+        payment_row.last_paid_at
       from users u
       left join roles r on r.id = u.role_id
       left join user_profiles up on up.user_id = u.id
@@ -1798,15 +2030,24 @@ def _user_base_query() -> str:
         where us.user_id = u.id
           and us.status = 'active'
           and (us.end_at is null or us.end_at >= now())
+          and p.code <> 'usage_based'
         order by us.start_at desc
         limit 1
       ) plan_row on true
       left join plans free_plan on free_plan.code = 'free'
       left join lateral (
-        select count(*)::int as total_sessions
+        select
+          count(*)::int as total_sessions,
+          count(*) filter (where status = 'completed')::int as completed_sessions,
+          round(avg(overall_score) filter (where overall_score is not null), 2) as average_session_score
         from interview_sessions s
         where s.user_id = u.id
       ) session_row on true
+      left join lateral (
+        select count(*)::int as cv_jd_analyses
+        from cv_jd_analyses a
+        where a.user_id = u.id
+      ) analysis_row on true
       left join lateral (
         select
           count(*)::int as ai_calls,
@@ -1816,10 +2057,23 @@ def _user_base_query() -> str:
         where a.user_id = u.id or (u.external_auth_id is not null and a.external_auth_id = u.external_auth_id)
       ) usage_row on true
       left join lateral (
-        select count(*)::int as activity_events
+        select count(*)::int as activity_events, max(occurred_at) as last_event_at
         from user_activity_events e
         where e.user_id = u.id or (u.external_auth_id is not null and e.external_auth_id = u.external_auth_id)
       ) activity_row on true
+      left join lateral (
+        select
+          count(*)::int as payment_attempts,
+          count(*) filter (where pt.status = 'paid')::int as paid_transactions,
+          count(*) filter (where pt.status = 'pending')::int as pending_transactions,
+          count(*) filter (where pt.status in ('failed', 'cancelled', 'expired'))::int as failed_transactions,
+          count(*) filter (where pt.status = 'paid' and p.code = 'usage_based')::int as usage_based_purchases,
+          coalesce(sum(pt.amount_vnd) filter (where pt.status = 'paid'), 0)::bigint as total_paid_vnd,
+          max(pt.paid_at) filter (where pt.status = 'paid') as last_paid_at
+        from payment_transactions pt
+        join plans p on p.id = pt.plan_id
+        where pt.user_id = u.id
+      ) payment_row on true
     """
 
 
@@ -1847,8 +2101,11 @@ def _user_filters(
         clauses.append("u.status = %s")
         params.append(status_filter)
     if plan_filter:
-        clauses.append("u.plan_code = %s")
-        params.append(plan_filter)
+        if plan_filter == "usage_based":
+            clauses.append("u.usage_based_purchases > 0")
+        else:
+            clauses.append("u.plan_code = %s")
+            params.append(plan_filter)
     return ("where " + " and ".join(clauses), params) if clauses else ("", params)
 
 
@@ -1889,10 +2146,24 @@ def _user_payload(row: dict[str, Any]) -> dict[str, Any]:
         },
         "usage": {
             "total_sessions": int(row.get("total_sessions") or 0),
+            "completed_sessions": int(row.get("completed_sessions") or 0),
+            "average_session_score": row.get("average_session_score"),
+            "cv_jd_analyses": int(row.get("cv_jd_analyses") or 0),
             "ai_calls": int(row.get("ai_calls") or 0),
             "total_tokens": int(row.get("total_tokens") or 0),
             "total_cost_usd": _money(row.get("total_cost_usd") or 0),
             "activity_events": int(row.get("activity_events") or 0),
+            "last_event_at": _iso(row.get("last_event_at")),
+        },
+        "economics": {
+            "payment_attempts": int(row.get("payment_attempts") or 0),
+            "paid_transactions": int(row.get("paid_transactions") or 0),
+            "pending_transactions": int(row.get("pending_transactions") or 0),
+            "failed_transactions": int(row.get("failed_transactions") or 0),
+            "usage_based_purchases": int(row.get("usage_based_purchases") or 0),
+            "total_paid_vnd": int(row.get("total_paid_vnd") or 0),
+            "total_paid_usd": _usd_from_vnd(row.get("total_paid_vnd")),
+            "last_paid_at": _iso(row.get("last_paid_at")),
         },
     }
 
@@ -1902,6 +2173,7 @@ def _payment_filters(
     date_from: date | None,
     date_to: date | None,
     status_filter: PaymentStatus | None,
+    plan: str | None,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -1931,6 +2203,9 @@ def _payment_filters(
         clauses.append("pt.status = 'pending'")
     elif status_filter == "failed":
         clauses.append("pt.status in ('failed', 'cancelled', 'expired')")
+    if plan and plan.lower() != "all":
+        clauses.append("p.code = %s")
+        params.append(plan.strip().lower())
     return ("where " + " and ".join(clauses), params) if clauses else ("", params)
 
 
@@ -1947,6 +2222,7 @@ def _admin_payment_payload(row: dict[str, Any]) -> dict[str, Any]:
         "email": row.get("email"),
         "full_name": row.get("full_name"),
         "plan": {"id": row.get("plan_id"), "code": row.get("plan_code"), "name": row.get("plan_name")},
+        "subscription_id": row.get("subscription_id"),
         "provider": row.get("provider"),
         "amount_vnd": amount_vnd,
         "amount_usd": _usd_from_vnd(amount_vnd),
@@ -1955,6 +2231,10 @@ def _admin_payment_payload(row: dict[str, Any]) -> dict[str, Any]:
         "provider_status": raw_status,
         "description": row.get("description"),
         "paid_at": _iso(row.get("paid_at")),
+        "period_start": _iso(row.get("period_start")),
+        "period_end": _iso(row.get("period_end")),
+        "cancelled_at": _iso(row.get("cancelled_at")),
+        "expired_at": _iso(row.get("expired_at")),
         "created_at": _iso(row.get("created_at")),
         "updated_at": _iso(row.get("updated_at")),
     }
@@ -2066,7 +2346,108 @@ def _unified_activity_base_query() -> str:
         'user_activity_events'::text as source
       from user_activity_events e
       left join users u on u.id = e.user_id
+
+      union all
+
+      select
+        'payment:' || pt.id::text as id,
+        coalesce(pt.paid_at, pt.cancelled_at, pt.updated_at, pt.created_at) as created_at,
+        'payment'::text as log_type,
+        case
+          when pt.status = 'paid' then 'Payment completed'
+          when pt.status = 'pending' then 'Payment initiated'
+          when pt.status = 'cancelled' then 'Payment cancelled'
+          when pt.status = 'expired' then 'Payment expired'
+          else 'Payment failed'
+        end as action,
+        concat(p.name, ' · ', to_char(pt.amount_vnd, 'FM999G999G999G990'), ' ', pt.currency, ' · ', pt.status) as detail,
+        null::varchar(64) as ip_address,
+        jsonb_build_object(
+          'payment_id', pt.id,
+          'order_code', pt.order_code,
+          'plan_code', p.code,
+          'amount_vnd', pt.amount_vnd,
+          'currency', pt.currency,
+          'provider_status', pt.status
+        ) as meta_json,
+        u.id::text as actor_user_id,
+        u.email as actor_email,
+        u.full_name as actor_full_name,
+        null::text as target_user_id,
+        null::varchar(255) as target_email,
+        null::varchar(255) as target_full_name,
+        'payment_transactions'::text as source
+      from payment_transactions pt
+      join users u on u.id = pt.user_id
+      join plans p on p.id = pt.plan_id
     """
+
+
+def _fetch_user_payment_metrics(cur, user_id: str) -> dict[str, Any]:
+    cur.execute(
+        """
+        select
+          count(*)::int as attempts,
+          count(*) filter (where status = 'paid')::int as paid_transactions,
+          count(*) filter (where status = 'pending')::int as pending_transactions,
+          count(*) filter (where status in ('failed', 'cancelled', 'expired'))::int as failed_transactions,
+          count(*) filter (where status = 'paid' and plan_id = (select id from plans where code = 'usage_based'))::int as usage_based_purchases,
+          coalesce(sum(amount_vnd) filter (where status = 'paid'), 0)::bigint as total_paid_vnd,
+          max(paid_at) filter (where status = 'paid') as last_paid_at
+        from payment_transactions
+        where user_id = %s
+        """,
+        (user_id,),
+    )
+    summary = dict(cur.fetchone() or {})
+    cur.execute(
+        """
+        select
+          pt.id,
+          pt.user_id,
+          u.email,
+          u.full_name,
+          pt.plan_id,
+          pt.subscription_id,
+          p.code as plan_code,
+          p.name as plan_name,
+          pt.provider,
+          pt.order_code,
+          pt.payment_link_id,
+          pt.amount_vnd,
+          pt.currency,
+          pt.status,
+          pt.description,
+          pt.paid_at,
+          pt.period_start,
+          pt.period_end,
+          pt.cancelled_at,
+          pt.expired_at,
+          pt.created_at,
+          pt.updated_at
+        from payment_transactions pt
+        join users u on u.id = pt.user_id
+        join plans p on p.id = pt.plan_id
+        where pt.user_id = %s
+        order by coalesce(pt.paid_at, pt.created_at) desc, pt.id desc
+        limit 20
+        """,
+        (user_id,),
+    )
+    total_paid_vnd = int(summary.get("total_paid_vnd") or 0)
+    return {
+        "summary": {
+            "attempts": int(summary.get("attempts") or 0),
+            "paid_transactions": int(summary.get("paid_transactions") or 0),
+            "pending_transactions": int(summary.get("pending_transactions") or 0),
+            "failed_transactions": int(summary.get("failed_transactions") or 0),
+            "usage_based_purchases": int(summary.get("usage_based_purchases") or 0),
+            "total_paid_vnd": total_paid_vnd,
+            "total_paid_usd": _usd_from_vnd(total_paid_vnd),
+            "last_paid_at": _iso(summary.get("last_paid_at")),
+        },
+        "items": [_admin_payment_payload(row) for row in cur.fetchall()],
+    }
 
 
 def _unified_activity_filters(

@@ -118,6 +118,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(payload["pro_users_count"], 0)
         self.assertEqual(payload["kpis"]["total_revenue_usd"], "10.000000")
         self.assertEqual(payload["charts"]["revenue"], [{"period": "2026-06-01", "revenue": "2.000000"}])
+        self.assertEqual(payload["charts"]["revenue_by_month"], payload["charts"]["revenue"])
         self.assertEqual(
             payload["users_by_plan"],
             [
@@ -134,6 +135,11 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(payload["feature_metrics"]["summary"]["total_events"], 12)
         self.assertEqual(payload["function_metrics"], [])
         self.assertEqual(payload["charts"]["feature_trend"], [{"period": "2026-06-01", "action_plan": 1}])
+        self.assertEqual(payload["business_report"]["registered_accounts"], 1)
+        self.assertEqual(payload["business_report"]["activated_accounts"], 1)
+        self.assertEqual(payload["business_report"]["ever_paid_accounts"], 1)
+        self.assertEqual(payload["business_report"]["all_time_api_cost_usd"], "0.250000")
+        self.assertEqual(payload["business_report"]["feature_usage"][2]["total_uses"], 3)
 
     def test_admin_routes_are_not_registered_twice(self):
         route_keys = [
@@ -162,6 +168,13 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(payload["stats"]["total_revenue_usd"], "10.000000")
         self.assertEqual(payload["items"][0]["status"], "success")
         self.assertEqual(payload["items"][0]["transaction_code"], "20260619000001")
+
+    def test_unified_activity_stream_includes_payment_transactions(self):
+        from routers.admin import _unified_activity_base_query
+
+        query = " ".join(_unified_activity_base_query().split()).lower()
+        self.assertIn("from payment_transactions pt", query)
+        self.assertIn("'payment'::text as log_type", query)
 
     def test_admin_can_suspend_user(self):
         self.authenticate_as("user")
@@ -299,6 +312,12 @@ class FakeOverviewCursor:
             {"completed_interviews": 0},
             {"total_ai_cost_usd": 0, "ai_calls": 0},
             {"total_revenue_vnd": 250000},
+            {
+                "registered_accounts": 1,
+                "activated_accounts": 1,
+                "ever_paid_accounts": 1,
+                "all_time_api_cost_usd": 0.25,
+            },
         ]
         row = rows[self.fetchone_calls]
         self.fetchone_calls += 1
@@ -314,6 +333,17 @@ class FakeOverviewCursor:
                     "is_paid": False,
                     "monthly_revenue": 0,
                 }
+            ],
+            [{"plan_code": "standard", "plan_name": "Standard", "paid_accounts": 1}],
+            [
+                {"feature_key": "cv_jd_analysis", "label": "CV/JD Analysis", "total_uses": 1},
+                {"feature_key": "ai_interview", "label": "AI Interview", "total_uses": 2},
+                {"feature_key": "coding_interview", "label": "Coding Interview", "total_uses": 3},
+                {
+                    "feature_key": "personalized_action_plan",
+                    "label": "Personalized Action Plan",
+                    "total_uses": 4,
+                },
             ],
             [],
             [{"period": "2026-06-01", "revenue_vnd": 50000}],

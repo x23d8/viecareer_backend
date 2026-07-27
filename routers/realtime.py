@@ -14,16 +14,17 @@ from core.rate_limit import (
     limiter,
     release_ws_slot,
 )
-from services.plan_quota_service import FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, check_plan_quota
 from schemas.realtime import RealtimeSessionEndRequest, RealtimeSessionMetadata
-from services.plan_quota_service import get_realtime_session_limit_seconds
+from services.interview_attempt_service import get_interview_attempt_status
 from services.realtime_service import (
-    create_realtime_session,
     create_webrtc_start_payload,
     finalize_realtime_session,
     relay_realtime_websocket,
 )
-from services.realtime_transcript_service import create_live_interview_session
+from services.realtime_transcript_service import (
+    create_live_interview_session,
+    get_live_interview_duration_limit,
+)
 
 logger = logging.getLogger("viecareer")
 
@@ -36,23 +37,24 @@ async def get_realtime_token(
     request: Request,
     current_user: ClerkUser = Depends(require_auth),
 ):
-    """
-    Create an ephemeral OpenAI Realtime session token.
-    Requires a valid Clerk JWT — anonymous callers are rejected.
-    """
-    await check_plan_quota(
-        external_auth_id=current_user.user_id,
-        feature_code=FEATURE_REALTIME_INTERVIEW,
-        metric=METRIC_SESSION_COUNT,
+    """Reject the legacy token-only flow because it cannot meter attempts."""
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "REALTIME_START_REQUIRED",
+            "message": "Use POST /realtime/start to create a metered interview session.",
+        },
     )
-    await check_daily_quota()
-    token = await asyncio.to_thread(create_realtime_session)
-    track_user_activity_async(
-        "realtime_token_created",
-        external_auth_id=current_user.user_id,
-        meta={"endpoint": "/realtime-token"},
-    )
-    return token
+
+
+@router.get("/interview-attempts")
+@limiter.limit("60/minute")
+async def interview_attempts(
+    request: Request,
+    current_user: ClerkUser = Depends(require_auth),
+):
+    result = await get_interview_attempt_status(external_auth_id=current_user.user_id)
+    return {"data": result.payload()}
 
 
 @router.post("/realtime/start")
@@ -62,24 +64,24 @@ async def start_realtime_session(
     payload: RealtimeSessionMetadata,
     current_user: ClerkUser = Depends(require_auth),
 ):
-    """Create a DB-backed OpenAI Realtime WebRTC session for the browser."""
+    """Create a persisted, attempt-metered OpenAI Realtime WebRTC session."""
     if payload.external_auth_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Realtime metadata user does not match the authenticated user")
 
     verified_request_email(current_user, str(payload.email))
     metadata = payload.model_dump(mode="json")
 
-    await check_plan_quota(
-        external_auth_id=current_user.user_id,
-        feature_code=FEATURE_REALTIME_INTERVIEW,
-        metric=METRIC_SESSION_COUNT,
-    )
     await check_daily_quota()
-    max_duration_seconds = await get_realtime_session_limit_seconds(external_auth_id=current_user.user_id)
-
+    # Creating the persisted session consumes one attempt in the same database
+    # transaction. The attempt is intentionally not refunded on early exit.
     session_id = await asyncio.to_thread(create_live_interview_session, metadata)
     if not session_id:
         raise HTTPException(status_code=500, detail="Could not persist realtime interview context")
+    max_duration_seconds = await asyncio.to_thread(get_live_interview_duration_limit, session_id)
+    if max_duration_seconds:
+        metadata["duration_minutes"] = max_duration_seconds // 60
+        if isinstance(metadata.get("blueprint"), dict):
+            metadata["blueprint"]["durationMinutes"] = max_duration_seconds // 60
 
     response = await asyncio.to_thread(
         create_webrtc_start_payload,
@@ -87,6 +89,7 @@ async def start_realtime_session(
         metadata=metadata,
         max_duration_seconds=max_duration_seconds,
     )
+    attempts = await get_interview_attempt_status(external_auth_id=current_user.user_id)
     track_user_activity_async(
         "interview_started",
         external_auth_id=current_user.user_id,
@@ -99,6 +102,8 @@ async def start_realtime_session(
             "voice_mode": metadata.get("voice_mode"),
             "transport": "webrtc",
             "question_count": len((metadata.get("blueprint") or {}).get("questions") or []),
+            "duration_minutes": payload.duration_minutes,
+            "attempts_remaining": attempts.remaining,
         },
     )
     return {
@@ -108,6 +113,7 @@ async def start_realtime_session(
         "connectUrl": response["connect_url"],
         "voiceMode": response["voice_mode"],
         "showTranscript": response["show_transcript"],
+        "attempts": attempts.payload(),
     }
 
 
@@ -119,7 +125,7 @@ async def end_realtime_session(
     request: Request,
     current_user: ClerkUser = Depends(require_auth),
 ):
-    """Finalize a browser-owned WebRTC realtime interview session."""
+    """Finalize a browser-owned WebRTC session without refunding its attempt."""
     await asyncio.to_thread(
         finalize_realtime_session,
         session_id=session_id,
@@ -134,15 +140,7 @@ async def realtime_websocket(
     websocket: WebSocket,
     current_user: ClerkUser = Depends(verify_ws_token),
 ):
-    """
-    Server-owned OpenAI Realtime WebSocket relay.
-
-    The client must pass a valid Clerk JWT as a query parameter:
-        ws://host/realtime/ws?token=<clerk_jwt>
-
-    Connection is rejected before the WebSocket handshake completes
-    if the token is missing or invalid.
-    """
+    """Relay a server-owned, authenticated OpenAI Realtime session."""
     client_ip = websocket.client.host if websocket.client else "unknown"
 
     try:

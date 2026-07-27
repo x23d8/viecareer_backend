@@ -29,6 +29,46 @@ _QUERY_ALIASES: dict[str, tuple[str, ...]] = {
     "frontend": ("front end", "frontend developer", "frontend engineer"),
     "marketing": ("digital marketing", "growth marketing", "tiep thi"),
 }
+_SKILL_ALIASES: dict[str, str] = {
+    "amazon web services": "aws",
+    "aws cloud": "aws",
+    "google cloud platform": "gcp",
+    "google cloud": "gcp",
+    "microsoft azure": "azure",
+    "javascript": "javascript",
+    "js": "javascript",
+    "typescript": "typescript",
+    "ts": "typescript",
+    "reactjs": "react",
+    "react.js": "react",
+    "nextjs": "next.js",
+    "nodejs": "node.js",
+    "node": "node.js",
+    "vuejs": "vue",
+    "vue.js": "vue",
+    "postgres": "postgresql",
+    "mongo": "mongodb",
+    "k8s": "kubernetes",
+    "machine learning": "machine learning",
+    "ml": "machine learning",
+    "artificial intelligence": "ai",
+    "generative ai": "genai",
+    "large language model": "llm",
+    "large language models": "llm",
+    "natural language processing": "nlp",
+    "continuous integration": "ci/cd",
+    "continuous delivery": "ci/cd",
+}
+_EXPERIENCE_LEVEL_ORDER = {
+    "internship": 0,
+    "fresher": 1,
+    "junior": 2,
+    "middle": 3,
+    "mid": 3,
+    "senior": 4,
+    "lead": 5,
+    "manager": 6,
+}
 
 _JOB_SELECT = """
 select
@@ -251,6 +291,105 @@ def get_job(*, job_id: str, external_auth_id: str | None) -> dict[str, Any]:
     except Exception as exc:
         logger.exception("Could not load job=%s", job_id)
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Could not load this job.") from exc
+
+
+def find_cv_job_matches(
+    *,
+    external_auth_id: str,
+    target_position: str | None,
+    candidate_skills: list[str],
+    cv_text: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    """Return explainable CV/JD matches, keeping fit and evidence confidence separate."""
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                stored_context = _load_user_context(cur, external_auth_id) or {}
+                skills = _dedupe_skills([*candidate_skills, *stored_context.get("skills", [])])
+                target = (target_position or stored_context.get("target_position") or "").strip()
+                candidate_years = _infer_candidate_experience_years(cv_text or "")
+                candidate_level = _infer_candidate_experience_level("", cv_text or "")
+                profile_ready = bool(skills or target or candidate_years is not None or candidate_level)
+
+                cur.execute(
+                    f"""
+                    {_JOB_SELECT}
+                    where j.is_active = true
+                      and (j.expires_at is null or j.expires_at > now())
+                      and exists (
+                        select 1 from job_sources active_js
+                        where active_js.job_id = j.id and active_js.is_active = true
+                      )
+                    order by coalesce(j.posted_at, j.first_seen_at) desc, j.updated_at desc
+                    limit 500
+                    """
+                )
+                rows = cur.fetchall()
+                user_id = stored_context.get("user_id")
+                states = _load_interaction_states(cur, user_id, rows) if user_id else {}
+
+                ranked: list[dict[str, Any]] = []
+                for row in rows:
+                    state = states.get(str(row["id"]), {})
+                    if state.get("dismissed"):
+                        continue
+                    match = _score_cv_job_match(
+                        row,
+                        candidate_skills=skills,
+                        target_position=target,
+                        candidate_years=candidate_years,
+                        candidate_level=candidate_level,
+                    )
+                    job = _job_payload(
+                        row,
+                        saved=bool(state.get("saved")),
+                        match_score=match["fit_score"],
+                        match_reasons=_cv_match_reasons(match),
+                    )
+                    ranked.append({**job, "cv_match": match})
+
+                ranked.sort(
+                    key=lambda item: (
+                        item["cv_match"]["ranking_score"],
+                        item["cv_match"]["confidence_score"],
+                        item.get("posted_at") or item.get("first_seen_at") or "",
+                    ),
+                    reverse=True,
+                )
+
+        profile_completeness = round(
+            min(55, len(skills) * 8)
+            + (25 if target else 0)
+            + (20 if candidate_years is not None or candidate_level else 0)
+        )
+        return {
+            "profile": {
+                "ready": profile_ready,
+                "source": "current_cv" if candidate_skills or cv_text or target_position else "saved_profile",
+                "target_position": target or None,
+                "skills": skills[:30],
+                "skills_count": len(skills),
+                "experience_years": candidate_years,
+                "experience_level": candidate_level,
+                "completeness_score": min(100, profile_completeness),
+            },
+            "matches": ranked[:limit] if profile_ready else [],
+            "evaluated_jobs": len(ranked),
+            "method": {
+                "fit": "Kỹ năng 60% · kinh nghiệm 25% · vị trí 15% (tự phân bổ khi JD thiếu dữ liệu)",
+                "confidence": "Độ đầy đủ của bằng chứng CV và JD; không phải xác suất được tuyển",
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not rank CV job matches user=%s", external_auth_id)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not analyze the CV against active jobs.",
+        ) from exc
 
 
 def get_job_practice_context(*, job_id: str, external_auth_id: str) -> dict[str, Any]:
@@ -882,6 +1021,212 @@ def _recommendation_score(
     if not reasons:
         reasons.append("Tin tuyển dụng đang hoạt động")
     return min(99, max(1, round(score))), reasons[:3]
+
+
+def _score_cv_job_match(
+    row: dict[str, Any],
+    *,
+    candidate_skills: list[str],
+    target_position: str,
+    candidate_years: int | None,
+    candidate_level: str | None,
+) -> dict[str, Any]:
+    job_skills = [str(value).strip() for value in (row.get("skills_json") or []) if str(value).strip()]
+    skill_score, matched_skills, partial_skills, missing_skills = _skill_fit(candidate_skills, job_skills)
+    role_score = _role_fit(target_position, str(row.get("title") or ""))
+    experience_score, experience_fit = _experience_fit(
+        candidate_years=candidate_years,
+        candidate_level=candidate_level,
+        job_min=row.get("experience_years_min"),
+        job_max=row.get("experience_years_max"),
+        job_level=row.get("experience_level"),
+    )
+
+    dimensions: list[tuple[float, float]] = []
+    if skill_score is not None:
+        dimensions.append((skill_score, 0.60))
+    if experience_score is not None:
+        dimensions.append((experience_score, 0.25))
+    if role_score is not None:
+        dimensions.append((role_score, 0.15))
+    weight_total = sum(weight for _, weight in dimensions)
+    fit_score = round(sum(score * weight for score, weight in dimensions) / weight_total) if weight_total else 0
+
+    candidate_skill_coverage = min(1.0, len(candidate_skills) / 6)
+    job_skill_coverage = min(1.0, len(job_skills) / 5)
+    skill_evidence = candidate_skill_coverage * job_skill_coverage
+    role_evidence = 1.0 if target_position and row.get("title") else 0.0
+    has_candidate_experience = candidate_years is not None or candidate_level is not None
+    has_job_experience = (
+        row.get("experience_years_min") is not None
+        or row.get("experience_years_max") is not None
+        or bool(row.get("experience_level"))
+    )
+    experience_evidence = 1.0 if has_candidate_experience and has_job_experience else 0.0
+    confidence_score = round(65 * skill_evidence + 20 * experience_evidence + 15 * role_evidence)
+    confidence_level = "high" if confidence_score >= 75 else "medium" if confidence_score >= 50 else "low"
+    ranking_score = round(fit_score * (0.65 + 0.35 * confidence_score / 100))
+
+    return {
+        "fit_score": min(100, max(0, fit_score)),
+        "ranking_score": min(100, max(0, ranking_score)),
+        "confidence_score": min(100, max(0, confidence_score)),
+        "confidence_level": confidence_level,
+        "skill_score": skill_score,
+        "experience_score": experience_score,
+        "role_score": role_score,
+        "experience_fit": experience_fit,
+        "matched_skills": matched_skills[:8],
+        "partial_skills": partial_skills[:5],
+        "missing_skills": missing_skills[:8],
+        "evidence": {
+            "candidate_skills_count": len(candidate_skills),
+            "job_skills_count": len(job_skills),
+            "candidate_experience_years": candidate_years,
+            "job_experience_years_min": row.get("experience_years_min"),
+            "job_experience_years_max": row.get("experience_years_max"),
+        },
+    }
+
+
+def _skill_fit(
+    candidate_skills: list[str],
+    job_skills: list[str],
+) -> tuple[int | None, list[str], list[str], list[str]]:
+    if not job_skills:
+        return None, [], [], []
+    candidate_canonical = {_canonical_skill(skill): skill for skill in candidate_skills if _canonical_skill(skill)}
+    matched: list[str] = []
+    partial: list[str] = []
+    missing: list[str] = []
+    earned = 0.0
+    for job_skill in job_skills:
+        canonical = _canonical_skill(job_skill)
+        if canonical in candidate_canonical:
+            matched.append(job_skill)
+            earned += 1
+            continue
+        job_tokens = _tokens(canonical)
+        best_similarity = max(
+            (_token_similarity(job_tokens, _tokens(candidate)) for candidate in candidate_canonical),
+            default=0.0,
+        )
+        if best_similarity >= 0.72:
+            partial.append(job_skill)
+            earned += 0.65
+        else:
+            missing.append(job_skill)
+    return round(100 * earned / len(job_skills)), matched, partial, missing
+
+
+def _role_fit(target_position: str, job_title: str) -> int | None:
+    if not target_position or not job_title:
+        return None
+    target = _normalize_text(target_position)
+    title = _normalize_text(job_title)
+    if target in title or title in target:
+        return 100
+    expanded = _expanded_query_terms(target)
+    if any(term in title or title in term for term in expanded):
+        return 88
+    target_tokens = set().union(*(_tokens(term) for term in expanded))
+    title_tokens = _tokens(title)
+    if not target_tokens or not title_tokens:
+        return 0
+    overlap = len(target_tokens & title_tokens)
+    return round(100 * overlap / max(1, min(len(target_tokens), len(title_tokens))))
+
+
+def _experience_fit(
+    *,
+    candidate_years: int | None,
+    candidate_level: str | None,
+    job_min: int | None,
+    job_max: int | None,
+    job_level: str | None,
+) -> tuple[int | None, str]:
+    if candidate_years is not None and (job_min is not None or job_max is not None):
+        minimum = int(job_min or 0)
+        maximum = int(job_max) if job_max is not None else None
+        if candidate_years < minimum:
+            gap = minimum - candidate_years
+            return (70 if gap == 1 else 40 if gap == 2 else 15), "below"
+        if maximum is not None and candidate_years > maximum + 4:
+            return 80, "above"
+        return 100, "matched"
+    candidate_rank = _EXPERIENCE_LEVEL_ORDER.get(str(candidate_level or "").casefold())
+    job_rank = _EXPERIENCE_LEVEL_ORDER.get(str(job_level or "").casefold())
+    if candidate_rank is None or job_rank is None:
+        return None, "unknown"
+    gap = candidate_rank - job_rank
+    if gap >= 0:
+        return (100 if gap <= 2 else 82), "matched" if gap <= 2 else "above"
+    return (70 if gap == -1 else 40 if gap == -2 else 15), "below"
+
+
+def _canonical_skill(value: str) -> str:
+    normalized = _normalize_text(value).strip(" .")
+    return _SKILL_ALIASES.get(normalized, normalized)
+
+
+def _token_similarity(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    if left <= right or right <= left:
+        return len(left & right) / max(1, min(len(left), len(right)))
+    return len(left & right) / len(left | right)
+
+
+def _dedupe_skills(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        skill = " ".join(str(value or "").split())[:100]
+        key = _canonical_skill(skill)
+        if skill and key and key not in seen:
+            result.append(skill)
+            seen.add(key)
+    return result[:100]
+
+
+def _infer_candidate_experience_years(cv_text: str) -> int | None:
+    normalized = _normalize_text(cv_text)
+    values = [
+        int(value)
+        for value in re.findall(r"\b(\d{1,2})\+?\s*(?:years?|yrs?|nam)\b", normalized)
+        if 0 <= int(value) <= 50
+    ]
+    return max(values) if values else None
+
+
+def _infer_candidate_experience_level(target_position: str, cv_text: str) -> str | None:
+    sample = _normalize_text(f"{target_position} {cv_text[:1500]}")
+    patterns = (
+        ("manager", r"\bmanager\b|quan ly"),
+        ("lead", r"\bteam lead\b|\btech lead\b|truong nhom"),
+        ("senior", r"\bsenior\b"),
+        ("middle", r"\bmiddle\b|\bmid[ -]?level\b"),
+        ("junior", r"\bjunior\b"),
+        ("fresher", r"\bfresher\b|entry[ -]?level"),
+        ("internship", r"\bintern(?:ship)?\b|thuc tap"),
+    )
+    for level, pattern in patterns:
+        if re.search(pattern, sample):
+            return level
+    return None
+
+
+def _cv_match_reasons(match: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if match["matched_skills"]:
+        reasons.append(f"Khớp kỹ năng: {', '.join(match['matched_skills'][:3])}")
+    if match["experience_fit"] == "matched":
+        reasons.append("Kinh nghiệm phù hợp yêu cầu")
+    elif match["experience_fit"] == "below":
+        reasons.append("Kinh nghiệm hiện thấp hơn yêu cầu")
+    if match["role_score"] is not None and match["role_score"] >= 70:
+        reasons.append("Vị trí phù hợp mục tiêu nghề nghiệp")
+    return reasons[:3] or ["Mức phù hợp dựa trên dữ liệu CV và JD hiện có"]
 
 
 def _job_payload(

@@ -21,6 +21,7 @@ from schemas.interview_simulation import (
     SelectNextQuestionRequest,
 )
 from services.interview_ai_service import evaluate_code_interview, save_code_interview_evaluation
+from services.interview_attempt_service import require_interview_attempt
 from services.interview_simulation_service import InterviewSimulationService
 from services.plan_quota_service import (
     FEATURE_AI_CODE_FEEDBACK,
@@ -43,6 +44,7 @@ async def generate_interview_blueprint(
 ):
     """Generate structured CV/JD analysis, adaptive question bank, and runtime policy."""
     started_at = time.perf_counter()
+    await require_interview_attempt(external_auth_id=current_user.user_id)
     await check_daily_quota()
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():

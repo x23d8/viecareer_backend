@@ -51,6 +51,36 @@ class JobPreferencesRequest(BaseModel):
         return normalized
 
 
+class CVJobMatchRequest(BaseModel):
+    """Candidate evidence used for transparent CV-to-job ranking."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_position: str | None = Field(default=None, max_length=300)
+    skills: list[str] = Field(default_factory=list, max_length=100)
+    cv_text: str | None = Field(default=None, max_length=60_000)
+    limit: int = Field(default=6, ge=1, le=12)
+
+    @field_validator("target_position", "cv_text")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        normalized = (value or "").strip()
+        return normalized or None
+
+    @field_validator("skills")
+    @classmethod
+    def normalize_candidate_skills(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = " ".join(value.split())[:100]
+            key = item.casefold()
+            if item and key not in seen:
+                normalized.append(item)
+                seen.add(key)
+        return normalized
+
+
 class JobIngestionPayload(BaseModel):
     """Normalized payload accepted from an authorized source connector."""
 

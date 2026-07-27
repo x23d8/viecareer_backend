@@ -150,6 +150,19 @@ def build_admin_report_workbook(
                         preferred_fields=FEEDBACK_FIELDS,
                         truncated=truncated,
                     )
+                    report_rows, reports_truncated = _export_user_reports(
+                        cur,
+                        start_at,
+                        end_at,
+                        plan_filter,
+                    )
+                    add_sheet(
+                        page="feedback",
+                        title="User Reports",
+                        rows=report_rows,
+                        preferred_fields=USER_REPORT_FIELDS,
+                        truncated=reports_truncated,
+                    )
 
                 if "ai_costs" in pages:
                     rows, truncated = _export_ai_usage(cur, start_at, end_at)
@@ -192,6 +205,9 @@ def build_admin_report_workbook(
 def _sheet_title(filename: str) -> str:
     titles = {
         "overview/kpis.csv": "Overview KPIs",
+        "overview/business-summary.csv": "Business Summary",
+        "overview/paid-accounts-by-plan.csv": "Paid Accounts by Plan",
+        "overview/report-feature-usage.csv": "Report Feature Usage",
         "overview/users-by-plan.csv": "Users by Plan",
         "overview/function-metrics.csv": "Function Metrics",
         "overview/landing-summary.csv": "Landing Summary",
@@ -343,6 +359,20 @@ def _overview_files(data: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]
         {**window_values, "metric": key, "value": value}
         for key, value in (data.get("kpis") or {}).items()
     ]
+    business = data.get("business_report") or {}
+    business_summary = [
+        {**window_values, "metric": key, "value": value}
+        for key, value in business.items()
+        if key not in {"scope", "ever_paid_accounts_by_plan", "feature_usage"}
+    ]
+    paid_accounts_by_plan = [
+        {**window_values, **dict(row)}
+        for row in business.get("ever_paid_accounts_by_plan") or []
+    ]
+    report_feature_usage = [
+        {**window_values, **dict(row)}
+        for row in business.get("feature_usage") or []
+    ]
     users_by_plan = [{**window_values, **dict(row)} for row in data.get("users_by_plan") or []]
     function_metrics = [{**window_values, **dict(row)} for row in data.get("function_metrics") or []]
     landing = data.get("landing_metrics") or {}
@@ -359,6 +389,9 @@ def _overview_files(data: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]
 
     return [
         ("overview/kpis.csv", kpi_rows, ["date_from", "date_to", "group_by", "metric", "value"]),
+        ("overview/business-summary.csv", business_summary, ["date_from", "date_to", "group_by", "metric", "value"]),
+        ("overview/paid-accounts-by-plan.csv", paid_accounts_by_plan, ["date_from", "date_to", "group_by", "plan_code", "plan_name", "paid_accounts"]),
+        ("overview/report-feature-usage.csv", report_feature_usage, ["date_from", "date_to", "group_by", "feature_key", "label", "total_uses"]),
         ("overview/users-by-plan.csv", users_by_plan, ["date_from", "date_to", "group_by", "plan_code", "plan_name", "users", "is_paid", "monthly_revenue"]),
         ("overview/function-metrics.csv", function_metrics, ["date_from", "date_to", "group_by", "feature_key", "label", "description", "kind", "events", "active_users", "ai_calls", "completions", "total_tokens", "total_cost_usd"]),
         ("overview/landing-summary.csv", landing_summary, ["date_from", "date_to", "group_by", "metric", "value"]),
@@ -377,8 +410,9 @@ USER_FIELDS = [
     "subscription_end_at", "subscription_auto_renew", "subscription_provider", "plan_quota_total",
     "plan_rate_limit_per_minute", "total_sessions", "completed_sessions", "average_session_score",
     "cv_jd_analyses", "feedback_count", "average_feedback_rating", "ai_calls", "prompt_tokens",
-    "completion_tokens", "total_tokens", "total_ai_cost_usd", "activity_events", "paid_transactions",
-    "total_paid_vnd", "terms_accepted_at", "terms_version", "privacy_policy_accepted_at",
+    "completion_tokens", "total_tokens", "total_ai_cost_usd", "activity_events", "payment_attempts",
+    "paid_transactions", "pending_transactions", "failed_transactions", "usage_based_purchases",
+    "total_paid_vnd", "last_paid_at", "terms_accepted_at", "terms_version", "privacy_policy_accepted_at",
     "privacy_policy_version", "last_active_at", "created_at", "updated_at",
 ]
 
@@ -431,8 +465,13 @@ def _export_users(cur, plan_filter: str = "all") -> tuple[list[dict[str, Any]], 
           coalesce(usage.total_tokens, 0)::int as total_tokens,
           coalesce(usage.total_ai_cost_usd, 0) as total_ai_cost_usd,
           coalesce(activity.activity_events, 0)::int as activity_events,
+          coalesce(payments.payment_attempts, 0)::int as payment_attempts,
           coalesce(payments.paid_transactions, 0)::int as paid_transactions,
+          coalesce(payments.pending_transactions, 0)::int as pending_transactions,
+          coalesce(payments.failed_transactions, 0)::int as failed_transactions,
+          coalesce(payments.usage_based_purchases, 0)::int as usage_based_purchases,
           coalesce(payments.total_paid_vnd, 0)::bigint as total_paid_vnd,
+          payments.last_paid_at,
           u.terms_accepted_at,
           u.terms_version,
           u.privacy_policy_accepted_at,
@@ -490,8 +529,17 @@ def _export_users(cur, plan_filter: str = "all") -> tuple[list[dict[str, Any]], 
           where e.user_id = u.id or (u.external_auth_id is not null and e.external_auth_id = u.external_auth_id)
         ) activity on true
         left join lateral (
-          select count(*)::int as paid_transactions, coalesce(sum(amount_vnd), 0)::bigint as total_paid_vnd
-          from payment_transactions p where p.user_id = u.id and p.status = 'paid'
+          select
+            count(*)::int as payment_attempts,
+            count(*) filter (where pt.status = 'paid')::int as paid_transactions,
+            count(*) filter (where pt.status = 'pending')::int as pending_transactions,
+            count(*) filter (where pt.status in ('failed', 'cancelled', 'expired'))::int as failed_transactions,
+            count(*) filter (where pt.status = 'paid' and plan.code = 'usage_based')::int as usage_based_purchases,
+            coalesce(sum(pt.amount_vnd) filter (where pt.status = 'paid'), 0)::bigint as total_paid_vnd,
+            max(pt.paid_at) filter (where pt.status = 'paid') as last_paid_at
+          from payment_transactions pt
+          join plans plan on plan.id = pt.plan_id
+          where pt.user_id = u.id
         ) payments on true
         where %s = 'all'
           or case
@@ -687,6 +735,44 @@ def _export_activity(cur, start_at: datetime, end_at: datetime) -> tuple[list[di
             e.meta_json
           from user_activity_events e
           left join users u on u.id = e.user_id
+
+          union all
+
+          select
+            'payment:' || pt.id::text as id,
+            coalesce(pt.paid_at, pt.cancelled_at, pt.updated_at, pt.created_at) as created_at,
+            'payment_transactions'::text as source,
+            'payment'::text as log_type,
+            ('payment_' || pt.status)::text as event_name,
+            case
+              when pt.status = 'paid' then 'Payment completed'
+              when pt.status = 'pending' then 'Payment initiated'
+              when pt.status = 'cancelled' then 'Payment cancelled'
+              when pt.status = 'expired' then 'Payment expired'
+              else 'Payment failed'
+            end as action,
+            concat(p.name, ' · ', pt.amount_vnd, ' ', pt.currency, ' · ', pt.status) as detail,
+            (pt.status = 'paid') as success,
+            null::int as duration_ms,
+            null::varchar(64) as ip_address,
+            u.id::text as actor_user_id,
+            u.external_auth_id as actor_external_auth_id,
+            u.email as actor_email,
+            u.full_name as actor_full_name,
+            null::text as target_user_id,
+            null::text as target_email,
+            null::text as target_full_name,
+            'payment'::text as object_type,
+            pt.id::text as object_id,
+            jsonb_build_object(
+              'order_code', pt.order_code,
+              'plan_code', p.code,
+              'amount_vnd', pt.amount_vnd,
+              'provider_status', pt.status
+            ) as meta_json
+          from payment_transactions pt
+          join users u on u.id = pt.user_id
+          join plans p on p.id = pt.plan_id
         ) activity
         where activity.created_at >= %s and activity.created_at < %s
         order by activity.created_at desc, activity.id desc
@@ -702,6 +788,12 @@ FEEDBACK_FIELDS = [
     "comment", "tags_json", "position", "company", "session_type",
     "session_status", "session_duration_seconds", "session_overall_score", "feedback_created_at",
     "feedback_updated_at", "session_created_at",
+]
+
+USER_REPORT_FIELDS = [
+    "report_id", "user_id", "external_auth_id", "email", "full_name", "kind", "feature", "path",
+    "comment", "status", "plan_category", "plan_code", "plan_name", "subscription_status",
+    "report_created_at", "report_updated_at",
 ]
 
 
@@ -876,6 +968,70 @@ def _export_feedback(
         [start_at, end_at, plan_filter, plan_filter],
     )
     return rows, truncated
+
+
+def _export_user_reports(
+    cur,
+    start_at: datetime,
+    end_at: datetime,
+    plan_filter: str = "all",
+) -> tuple[list[dict[str, Any]], bool]:
+    return _fetch_limited(
+        cur,
+        """
+        select
+          r.id::text as report_id,
+          r.user_id::text as user_id,
+          u.external_auth_id,
+          u.email,
+          u.full_name,
+          r.kind,
+          r.feature,
+          r.path,
+          r.comment,
+          r.status,
+          case
+            when subscription.plan_code is not null
+              and subscription.plan_code <> 'free'
+              and subscription.subscription_status = 'active'
+            then 'Paid'
+            else 'Free'
+          end as plan_category,
+          coalesce(subscription.plan_code, 'free') as plan_code,
+          coalesce(subscription.plan_name, 'Free') as plan_name,
+          subscription.subscription_status,
+          r.created_at as report_created_at,
+          r.updated_at as report_updated_at
+        from user_reports r
+        join users u on u.id = r.user_id
+        left join lateral (
+          select
+            p.code as plan_code,
+            p.name as plan_name,
+            us.status as subscription_status
+          from user_subscriptions us
+          join plans p on p.id = us.plan_id
+          where us.user_id = u.id
+          order by (us.status = 'active') desc, us.start_at desc, us.id desc
+          limit 1
+        ) subscription on true
+        where r.created_at >= %s
+          and r.created_at < %s
+          and (
+            %s = 'all'
+            or case
+              when subscription.plan_code is not null
+                and subscription.plan_code <> 'free'
+                and subscription.subscription_status = 'active'
+              then 'paid'
+              else 'free'
+            end = %s
+          )
+        order by r.created_at desc, r.id desc
+        limit %s
+        """,
+        [start_at, end_at, plan_filter, plan_filter],
+    )
 
 
 AI_USAGE_FIELDS = [

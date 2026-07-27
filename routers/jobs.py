@@ -10,6 +10,7 @@ from core.clerk_auth import ClerkUser, optional_auth, require_auth
 from core.openai_client import get_openai_client
 from core.rate_limit import ai_concurrency_limit, check_daily_quota, check_user_limit_ai, limiter
 from schemas.jobs import (
+    CVJobMatchRequest,
     EmploymentType,
     ExperienceLevel,
     JobIngestionPayload,
@@ -22,6 +23,7 @@ from schemas.chat import ChatRequest
 from services.job_ingestion_service import sync_authorized_sources
 from services.job_market_service import (
     clear_recent_searches,
+    find_cv_job_matches,
     get_job,
     get_job_practice_context,
     get_job_match_context,
@@ -138,6 +140,27 @@ def delete_recent_searches(request: Request, current_user: ClerkUser = Depends(r
     del request
     clear_recent_searches(external_auth_id=current_user.user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/cv-matches")
+@limiter.limit("30/minute")
+def cv_job_matches(
+    request: Request,
+    payload: CVJobMatchRequest,
+    current_user: ClerkUser = Depends(require_auth),
+):
+    """Rank active jobs against CV evidence without spending an AI quota."""
+
+    del request
+    return {
+        "data": find_cv_job_matches(
+            external_auth_id=current_user.user_id,
+            target_position=payload.target_position,
+            candidate_skills=payload.skills,
+            cv_text=payload.cv_text,
+            limit=payload.limit,
+        )
+    }
 
 
 @router.post("/sync")

@@ -36,7 +36,9 @@ class InterviewSimulationService:
             usage_context=self.usage_context,
         )
         blueprint = _parse_json_object(raw)
-        return _normalize_blueprint(blueprint, req.target_question_count, req.language)
+        normalized = _normalize_blueprint(blueprint, req.target_question_count, req.language)
+        normalized["durationMinutes"] = req.duration_minutes
+        return normalized
 
     def generate_coding_plan(self, req: GenerateCodingPlanRequest) -> dict[str, Any]:
         prompt = _coding_plan_prompt(req)
@@ -105,6 +107,7 @@ def _blueprint_prompt(req: GenerateInterviewBlueprintRequest) -> str:
     allocation_guide = _STYLE_ALLOCATION.get(req.interview_style, _STYLE_ALLOCATION["mixed"])
     return f"""Language: {req.language}
 Target question count: {req.target_question_count}
+Target interview duration: {req.duration_minutes} minutes
 Interview style: {req.interview_style}
 Question allocation for this style: {allocation_guide}
 
@@ -117,6 +120,7 @@ CV:
 JD:
 {req.jd_text}
 
+Design questions whose expected answers and follow-ups fit inside the selected duration.
 Return a complete interview blueprint."""
 
 

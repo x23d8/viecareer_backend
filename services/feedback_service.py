@@ -13,6 +13,54 @@ logger = logging.getLogger("viecareer")
 NEGATIVE_EMOTIONS = ("very_bad", "bad")
 
 
+def submit_user_report(
+    *,
+    external_auth_id: str,
+    email: str | None,
+    kind: str,
+    feature: str,
+    path: str | None,
+    comment: str,
+) -> dict[str, Any]:
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                _ensure_feedback_schema(cur)
+                user = _get_user(cur, external_auth_id=external_auth_id, email=email)
+                if not user:
+                    raise HTTPException(
+                        status.HTTP_404_NOT_FOUND,
+                        detail="User profile has not been synced yet.",
+                    )
+                cur.execute(
+                    """
+                    insert into user_reports (user_id, kind, feature, path, comment)
+                    values (%s, %s, %s, %s, %s)
+                    returning *
+                    """,
+                    (user["id"], kind, feature, path, comment),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return {
+            "id": str(row["id"]),
+            "kind": row["kind"],
+            "feature": row["feature"],
+            "path": row.get("path"),
+            "comment": row["comment"],
+            "status": row["status"],
+            "created_at": _iso(row.get("created_at")),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not save user report user=%s kind=%s", external_auth_id, kind)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not send your report. Please try again.",
+        ) from exc
+
+
 def submit_session_feedback(
     *,
     external_auth_id: str,
@@ -171,6 +219,50 @@ def list_admin_feedback(
         with get_connection() as conn:
             with conn.cursor() as cur:
                 _ensure_feedback_schema(cur)
+                feedback_rows_sql = """
+                    with feedback_rows as (
+                      select
+                        f.id,
+                        f.session_id,
+                        f.user_id,
+                        f.source,
+                        f.emotion,
+                        f.rating,
+                        f.comment,
+                        f.tags_json,
+                        f.created_at,
+                        f.updated_at,
+                        s.position,
+                        s.company,
+                        s.session_type,
+                        u.email,
+                        u.full_name
+                      from session_feedback f
+                      join interview_sessions s on s.id = f.session_id
+                      join users u on u.id = f.user_id
+
+                      union all
+
+                      select
+                        r.id,
+                        null::uuid as session_id,
+                        r.user_id,
+                        'report'::varchar as source,
+                        'neutral'::varchar as emotion,
+                        3::smallint as rating,
+                        r.comment,
+                        jsonb_build_array(r.kind) as tags_json,
+                        r.created_at,
+                        r.updated_at,
+                        r.feature as position,
+                        r.path as company,
+                        r.kind as session_type,
+                        u.email,
+                        u.full_name
+                      from user_reports r
+                      join users u on u.id = r.user_id
+                    )
+                """
                 clauses = ["true"]
                 params: list[Any] = []
                 if negative_only:
@@ -192,9 +284,9 @@ def list_admin_feedback(
                     clauses.append(
                         """
                         (
-                          coalesce(u.email, '') ilike %s
-                          or coalesce(u.full_name, '') ilike %s
-                          or coalesce(s.position, '') ilike %s
+                          coalesce(f.email, '') ilike %s
+                          or coalesce(f.full_name, '') ilike %s
+                          or coalesce(f.position, '') ilike %s
                           or coalesce(f.comment, '') ilike %s
                           or f.session_id::text ilike %s
                         )
@@ -205,10 +297,9 @@ def list_admin_feedback(
 
                 cur.execute(
                     f"""
+                    {feedback_rows_sql}
                     select count(*)::int as total
-                    from session_feedback f
-                    join interview_sessions s on s.id = f.session_id
-                    join users u on u.id = f.user_id
+                    from feedback_rows f
                     where {where_sql}
                     """,
                     params,
@@ -217,16 +308,10 @@ def list_admin_feedback(
 
                 cur.execute(
                     f"""
+                    {feedback_rows_sql}
                     select
-                      f.*,
-                      s.position,
-                      s.company,
-                      s.session_type,
-                      u.email,
-                      u.full_name
-                    from session_feedback f
-                    join interview_sessions s on s.id = f.session_id
-                    join users u on u.id = f.user_id
+                      f.*
+                    from feedback_rows f
                     where {where_sql}
                     order by f.updated_at desc, f.created_at desc
                     limit %s offset %s
@@ -287,12 +372,33 @@ def _ensure_feedback_schema(cur) -> None:
     cur.execute(
         "create index if not exists idx_session_feedback_tags on session_feedback using gin (tags_json)"
     )
+    cur.execute(
+        """
+        create table if not exists user_reports (
+          id uuid primary key default gen_random_uuid(),
+          user_id uuid not null references users(id) on delete cascade,
+          kind varchar(20) not null check (kind in ('feedback', 'bug')),
+          feature varchar(80) not null,
+          path varchar(500) null,
+          comment text not null,
+          status varchar(20) not null default 'open' check (status in ('open', 'reviewing', 'resolved')),
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+        """
+    )
+    cur.execute(
+        "create index if not exists idx_user_reports_kind_created on user_reports (kind, created_at desc)"
+    )
+    cur.execute(
+        "create index if not exists idx_user_reports_user_created on user_reports (user_id, created_at desc)"
+    )
 
 
 def _feedback_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
-        "session_id": str(row["session_id"]),
+        "session_id": str(row["session_id"]) if row.get("session_id") else None,
         "source": row["source"],
         "emotion": row["emotion"],
         "rating": int(row["rating"]),

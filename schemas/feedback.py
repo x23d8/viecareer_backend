@@ -13,6 +13,7 @@ FeedbackTag = Literal[
     "useful",
     "incorrect_feedback",
 ]
+UserReportKind = Literal["feedback", "bug"]
 
 
 class SubmitFeedbackRequest(BaseModel):
@@ -58,4 +59,29 @@ class CreateCodingSessionRequest(BaseModel):
         if value is None:
             return None
         normalized = value.strip()
+        return normalized or None
+
+
+class SubmitUserReportRequest(BaseModel):
+    """Session-independent feedback or bug report from any product feature."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: UserReportKind
+    feature: str = Field(..., min_length=1, max_length=80)
+    path: str | None = Field(default=None, max_length=500)
+    comment: str = Field(..., min_length=3, max_length=4000)
+
+    @field_validator("feature", "comment")
+    @classmethod
+    def normalize_required_report_text(cls, value: str) -> str:
+        normalized = " ".join(value.split()) if len(value) <= 100 else value.strip()
+        if not normalized:
+            raise ValueError("value must not be blank")
+        return normalized
+
+    @field_validator("path")
+    @classmethod
+    def normalize_report_path(cls, value: str | None) -> str | None:
+        normalized = (value or "").strip()
         return normalized or None

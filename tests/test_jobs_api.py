@@ -24,6 +24,7 @@ from services.job_ingestion_service import (  # noqa: E402
 )
 from services.job_market_service import (  # noqa: E402
     _load_interaction_states,
+    _score_cv_job_match,
     get_job_practice_context,
 )
 
@@ -108,6 +109,79 @@ class JobsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"], result)
         mocked.assert_called_once_with(job_id="job-1", external_auth_id="user_jobs_123")
+
+    def test_cv_matches_use_current_cv_evidence_and_authenticated_user(self):
+        app.dependency_overrides[require_auth] = lambda: ClerkUser(user_id="user_jobs_123")
+        result = {
+            "profile": {"ready": True, "skills_count": 3},
+            "matches": [],
+            "evaluated_jobs": 10,
+        }
+        with patch("routers.jobs.find_cv_job_matches", return_value=result) as mocked:
+            response = self.client.post(
+                "/api/jobs/cv-matches",
+                json={
+                    "target_position": "Backend Engineer",
+                    "skills": ["Python", "FastAPI", "PostgreSQL"],
+                    "cv_text": "Backend engineer with 3 years of experience.",
+                    "limit": 4,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"], result)
+        mocked.assert_called_once_with(
+            external_auth_id="user_jobs_123",
+            target_position="Backend Engineer",
+            candidate_skills=["Python", "FastAPI", "PostgreSQL"],
+            cv_text="Backend engineer with 3 years of experience.",
+            limit=4,
+        )
+
+    def test_cv_match_score_uses_skill_aliases_and_experience_evidence(self):
+        match = _score_cv_job_match(
+            {
+                "title": "Senior Backend Engineer",
+                "skills_json": ["Python", "PostgreSQL", "Amazon Web Services", "Docker"],
+                "experience_years_min": 3,
+                "experience_years_max": 6,
+                "experience_level": "senior",
+            },
+            candidate_skills=["Python", "Postgres", "AWS", "Docker", "FastAPI", "Redis"],
+            target_position="Backend Engineer",
+            candidate_years=4,
+            candidate_level="middle",
+        )
+
+        self.assertEqual(match["skill_score"], 100)
+        self.assertEqual(match["experience_score"], 100)
+        self.assertEqual(match["experience_fit"], "matched")
+        self.assertEqual(match["confidence_level"], "high")
+        self.assertGreaterEqual(match["fit_score"], 95)
+        self.assertEqual(
+            match["matched_skills"],
+            ["Python", "PostgreSQL", "Amazon Web Services", "Docker"],
+        )
+
+    def test_cv_match_confidence_stays_low_when_evidence_is_sparse(self):
+        match = _score_cv_job_match(
+            {
+                "title": "Software Engineer",
+                "skills_json": [],
+                "experience_years_min": None,
+                "experience_years_max": None,
+                "experience_level": None,
+            },
+            candidate_skills=["Python"],
+            target_position="Software Engineer",
+            candidate_years=None,
+            candidate_level=None,
+        )
+
+        self.assertEqual(match["fit_score"], 100)
+        self.assertEqual(match["confidence_level"], "low")
+        self.assertLess(match["confidence_score"], 30)
+        self.assertLess(match["ranking_score"], match["fit_score"])
 
     def test_practice_context_normalizes_the_authoritative_job(self):
         description = "  Build reliable FastAPI services.  \n\n Work with PostgreSQL.  " * 4

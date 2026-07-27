@@ -8,10 +8,12 @@ from schemas.feedback import (
     FeedbackSource,
     FeedbackTag,
     SubmitFeedbackRequest,
+    SubmitUserReportRequest,
 )
 from services.feedback_service import (
     create_completed_coding_session,
     list_admin_feedback,
+    submit_user_report,
     submit_session_feedback,
 )
 
@@ -37,6 +39,28 @@ def submit_feedback(
             rating=payload.rating,
             comment=payload.comment,
             tags=list(payload.tags),
+        )
+    }
+
+
+@router.post("/api/feedback/reports", status_code=status.HTTP_201_CREATED)
+@limiter.limit("20/minute")
+def submit_general_report(
+    request: Request,
+    payload: SubmitUserReportRequest,
+    current_user: ClerkUser = Depends(require_auth),
+):
+    """Accept feedback and bug reports without requiring a CV or interview session."""
+
+    del request
+    return {
+        "data": submit_user_report(
+            external_auth_id=current_user.user_id,
+            email=current_user.email,
+            kind=payload.kind,
+            feature=payload.feature,
+            path=payload.path,
+            comment=payload.comment,
         )
     }
 

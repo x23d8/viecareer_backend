@@ -24,6 +24,7 @@ class InterviewContext(BaseModel):
 
 class GenerateInterviewBlueprintRequest(InterviewContext):
     target_question_count: int = Field(default=8, ge=4, le=20)
+    duration_minutes: int = Field(default=20, ge=5, le=60)
     language: InterviewLanguage = "en"
     interview_style: InterviewStyle = "mixed"
 

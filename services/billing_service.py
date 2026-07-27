@@ -29,6 +29,7 @@ from config import (
     PAYOS_RETURN_URL,
 )
 from core.database import get_connection
+from services.interview_attempt_service import get_interview_attempt_status_sync
 from services.plan_quota_service import ensure_plan_quota_schema, get_plan_quota_summary_sync
 from services.user_service import upsert_auth_user
 
@@ -101,6 +102,13 @@ def get_billing_overview(*, external_auth_id: str, email: str | None) -> dict[st
     ensure_billing_schema()
     expire_due_subscriptions_sync()
     quota_summary = get_plan_quota_summary_sync(external_auth_id=external_auth_id)
+    interview_attempts = get_interview_attempt_status_sync(external_auth_id=external_auth_id)
+    quota_summary = [
+        quota
+        for quota in quota_summary
+        if quota.get("feature_code") != "realtime_interview"
+    ]
+    quota_summary.insert(0, interview_attempts.quota_payload())
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -114,6 +122,7 @@ def get_billing_overview(*, external_auth_id: str, email: str | None) -> dict[st
                     "plans": plans,
                     "recent_payments": [],
                     "quota_summary": quota_summary,
+                    "interview_attempts": interview_attempts.payload(),
                 }
 
             subscription = _current_subscription(cur, user["id"])
@@ -126,6 +135,7 @@ def get_billing_overview(*, external_auth_id: str, email: str | None) -> dict[st
         "plans": plans,
         "recent_payments": payments,
         "quota_summary": quota_summary,
+        "interview_attempts": interview_attempts.payload(),
     }
 
 
@@ -177,6 +187,82 @@ async def sync_payos_order(
         conn.commit()
 
     return result
+
+
+async def reconcile_pending_payos_payments(*, limit: int = 25) -> dict[str, Any]:
+    """Refresh stale local payment attempts from payOS.
+
+    Webhooks are the primary source of truth, but a customer may close the
+    browser before the return-page sync and some terminal provider events may
+    not reach us. Admins can safely reconcile those local ``pending`` rows.
+    """
+
+    ensure_billing_schema()
+    _require_payos_config()
+    safe_limit = max(1, min(int(limit), 100))
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select order_code
+                from payment_transactions
+                where status = %s
+                  and provider = %s
+                  and order_code is not null
+                order by created_at asc
+                limit %s
+                """,
+                (PAYMENT_STATUS_PENDING, PAYMENT_PROVIDER_PAYOS, safe_limit),
+            )
+            order_codes = [int(row["order_code"]) for row in cur.fetchall()]
+
+    summary: dict[str, Any] = {
+        "scanned": len(order_codes),
+        "updated": 0,
+        "paid": 0,
+        "cancelled": 0,
+        "expired": 0,
+        "still_pending": 0,
+        "errors": [],
+    }
+    for order_code in order_codes:
+        try:
+            response = await _payos_request("GET", f"/v2/payment-requests/{order_code}")
+            data = response.get("data") or {}
+            status_value = str(data.get("status") or "").upper()
+            if response.get("signature") and not _verify_payos_signature(data, str(response["signature"])):
+                raise ValueError("Invalid payOS response signature.")
+
+            next_status = {
+                PAYOS_PAID_STATUS: PAYMENT_STATUS_PAID,
+                PAYOS_CANCELLED_STATUS: PAYMENT_STATUS_CANCELLED,
+                PAYOS_EXPIRED_STATUS: PAYMENT_STATUS_EXPIRED,
+            }.get(status_value)
+            if not next_status:
+                summary["still_pending"] += 1
+                continue
+
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    _ensure_billing_schema(cur)
+                    payment = _lock_payment_by_order_code(cur, order_code)
+                    if not payment or payment["status"] != PAYMENT_STATUS_PENDING:
+                        conn.commit()
+                        continue
+                    if next_status == PAYMENT_STATUS_PAID:
+                        result = _apply_paid_payment(cur, payment, data, response)
+                    else:
+                        result = _mark_locked_payment_status(cur, payment, next_status, data, response)
+                conn.commit()
+
+            result_status = str(result.get("status") or next_status)
+            summary["updated"] += 1
+            summary[result_status] = int(summary.get(result_status) or 0) + 1
+        except Exception as exc:
+            logger.exception("Could not reconcile payOS order=%s", order_code)
+            summary["errors"].append({"order_code": order_code, "message": str(exc)})
+
+    return summary
 
 
 def handle_payos_webhook(payload: dict[str, Any]) -> dict[str, Any]:

@@ -111,6 +111,51 @@ class FeedbackApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["data"]["id"], "coding-session-id")
 
+    def test_general_feedback_does_not_require_cv_or_interview_session(self):
+        result = {
+            "id": "report-id",
+            "kind": "feedback",
+            "feature": "Dashboard",
+            "path": "/dashboard",
+            "comment": "Please make the usage cards easier to compare.",
+            "status": "open",
+            "created_at": None,
+        }
+        with patch("routers.feedback.submit_user_report", return_value=result) as mocked:
+            response = self.client.post(
+                "/api/feedback/reports",
+                json={
+                    "kind": "feedback",
+                    "feature": "Dashboard",
+                    "path": "/dashboard",
+                    "comment": "Please make the usage cards easier to compare.",
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["data"], result)
+        mocked.assert_called_once_with(
+            external_auth_id="user_feedback_123",
+            email="feedback@example.com",
+            kind="feedback",
+            feature="Dashboard",
+            path="/dashboard",
+            comment="Please make the usage cards easier to compare.",
+        )
+
+    def test_bug_report_rejects_blank_content_and_unknown_fields(self):
+        response = self.client.post(
+            "/api/feedback/reports",
+            json={
+                "kind": "bug",
+                "feature": "AI Interview",
+                "path": "/interview",
+                "comment": "  ",
+                "screenshot": "private-data",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -102,6 +102,20 @@ class AdminReportExportTests(unittest.TestCase):
                 "kpis": {"total_users": 12, "ai_calls": 34},
                 "users_by_plan": [{"plan_code": "free", "users": 10}],
                 "function_metrics": [{"feature_key": "chatbot", "events": 9}],
+                "business_report": {
+                    "landing_page_visits": 50,
+                    "registered_accounts": 12,
+                    "activated_accounts": 8,
+                    "ever_paid_accounts": 3,
+                    "ever_paid_accounts_by_plan": [
+                        {"plan_code": "standard", "plan_name": "Standard", "paid_accounts": 2}
+                    ],
+                    "feature_usage": [
+                        {"feature_key": "ai_interview", "label": "AI Interview", "total_uses": 7}
+                    ],
+                    "period_api_cost_usd": "0.250000",
+                    "all_time_api_cost_usd": "1.500000",
+                },
                 "landing_metrics": {"summary": {"landing_views": 50}, "by_source": [], "trend": []},
                 "charts": {"feature_trend": [], "ai_cost_by_day": [], "revenue": []},
             },
@@ -110,6 +124,9 @@ class AdminReportExportTests(unittest.TestCase):
         workbook = load_workbook(io.BytesIO(content))
         self.assertEqual(workbook.sheetnames[0], "Export Guide")
         self.assertIn("Overview KPIs", workbook.sheetnames)
+        self.assertIn("Business Summary", workbook.sheetnames)
+        self.assertIn("Paid Accounts by Plan", workbook.sheetnames)
+        self.assertIn("Report Feature Usage", workbook.sheetnames)
         self.assertIn("Function Metrics", workbook.sheetnames)
         kpis = workbook["Overview KPIs"]
         self.assertEqual(kpis.freeze_panes, "A2")

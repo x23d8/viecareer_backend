@@ -46,14 +46,14 @@ class FakeConnection:
 
 
 class RealtimeQuotaLifecycleTests(unittest.TestCase):
-    def test_quota_counts_only_realtime_sessions_with_qa(self):
+    def test_quota_counts_every_consumed_realtime_attempt(self):
         cursor = FakeCursor({"used": 2})
         used = _realtime_session_count(cursor, "user_123", None)
 
         self.assertEqual(used, 2)
-        self.assertIn("s.context_json is not null", cursor.query)
-        self.assertIn("from interview_qa_pairs", cursor.query)
-        self.assertIn("exists", cursor.query)
+        self.assertIn("s.attempt_consumed = true", cursor.query)
+        self.assertNotIn("interview_qa_pairs", cursor.query)
+        self.assertEqual(cursor.params, ("user_123", None, None))
 
     def test_empty_session_is_cancelled_instead_of_completed(self):
         cursor = FakeCursor()

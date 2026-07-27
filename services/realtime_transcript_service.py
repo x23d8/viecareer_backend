@@ -5,6 +5,10 @@ from typing import Any
 from psycopg2.extras import Json
 
 from core.database import get_connection
+from services.interview_attempt_service import (
+    consume_interview_attempt,
+    ensure_interview_attempt_schema,
+)
 from services.interview_report_service import _ensure_interview_report_schema
 from services.user_service import upsert_auth_user
 
@@ -34,6 +38,14 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
     blueprint = metadata.get("blueprint") if isinstance(metadata.get("blueprint"), dict) else metadata.get("interview_blueprint")
     blueprint = blueprint if isinstance(blueprint, dict) else {}
     interview_style = str(metadata.get("interview_style") or "mixed")
+    question_count = len(
+        {
+            str(question.get("id") or "").strip()
+            for question in (blueprint.get("questions") or [])
+            if isinstance(question, dict) and str(question.get("id") or "").strip()
+        }
+    )
+    selected_duration_seconds = max(1, int(metadata.get("duration_minutes") or 20)) * 60
     context_snapshot = {
         "candidate": candidate,
         "position": position,
@@ -44,6 +56,8 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
         "show_transcript": show_transcript,
         "blueprint": blueprint,
         "interview_style": interview_style,
+        "question_count": question_count,
+        "selected_duration_minutes": selected_duration_seconds // 60,
         "cv_jd_analysis_id": metadata.get("cv_jd_analysis_id"),
         "job_id": metadata.get("job_id"),
     }
@@ -51,6 +65,14 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             _ensure_interview_report_schema(cur)
+            reservation = consume_interview_attempt(cur, user_id=user["id"])
+            effective_duration_seconds = min(
+                selected_duration_seconds,
+                reservation.max_session_minutes * 60,
+            )
+            context_snapshot["duration_minutes"] = effective_duration_seconds // 60
+            context_snapshot["attempt_source"] = reservation.source
+            context_snapshot["session_max_minutes"] = reservation.max_session_minutes
             cur.execute(
                 """
                 insert into interview_sessions (
@@ -67,12 +89,17 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                   language,
                   voice,
                   blueprint_json,
-                  context_json
+                  context_json,
+                  attempt_consumed,
+                  attempt_source,
+                  requested_question_count,
+                  requested_duration_seconds
                 )
                 values (
                   %s, %s, %s, %s,
                   (select company_name from jobs where id = %s),
-                  %s, 'in_progress', now(), %s, %s, %s, %s, %s, %s
+                  %s, 'in_progress', now(), %s, %s, %s, %s, %s, %s,
+                  true, %s, %s, %s
                 )
                 returning id
                 """,
@@ -89,11 +116,33 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                     voice,
                     Json(blueprint),
                     Json(context_snapshot),
+                    reservation.source,
+                    question_count,
+                    effective_duration_seconds,
                 ),
             )
             row = cur.fetchone()
         conn.commit()
     return str(row["id"]) if row else None
+
+
+def get_live_interview_duration_limit(session_id: str | None) -> int | None:
+    if not session_id:
+        return None
+    ensure_interview_attempt_schema()
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select requested_duration_seconds
+                from interview_sessions
+                where id = %s
+                limit 1
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+    return int(row["requested_duration_seconds"]) if row and row.get("requested_duration_seconds") else None
 
 
 def save_realtime_transcript_event(

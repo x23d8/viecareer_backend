@@ -252,6 +252,17 @@ alter table interview_sessions add column if not exists language varchar(10) nul
 alter table interview_sessions add column if not exists voice varchar(30) null;
 alter table interview_sessions add column if not exists blueprint_json jsonb null;
 alter table interview_sessions add column if not exists context_json jsonb null;
+alter table interview_sessions add column if not exists attempt_consumed boolean not null default false;
+alter table interview_sessions add column if not exists attempt_source varchar(20) null
+  check (attempt_source in ('included', 'purchased'));
+alter table interview_sessions add column if not exists requested_question_count int null;
+alter table interview_sessions add column if not exists requested_duration_seconds int null;
+
+update interview_sessions
+set attempt_consumed = true,
+    attempt_source = coalesce(attempt_source, 'included')
+where context_json is not null
+  and started_at is not null;
 
 create table if not exists interview_qa_pairs (
   id bigserial primary key,
@@ -354,6 +365,24 @@ create index if not exists idx_session_feedback_session
 
 create index if not exists idx_session_feedback_tags
   on session_feedback using gin (tags_json);
+
+create table if not exists user_reports (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  kind varchar(20) not null check (kind in ('feedback', 'bug')),
+  feature varchar(80) not null,
+  path varchar(500) null,
+  comment text not null,
+  status varchar(20) not null default 'open' check (status in ('open', 'reviewing', 'resolved')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_user_reports_kind_created
+  on user_reports (kind, created_at desc);
+
+create index if not exists idx_user_reports_user_created
+  on user_reports (user_id, created_at desc);
 
 create table if not exists chat_conversations (
   id uuid primary key default gen_random_uuid(),
@@ -504,6 +533,9 @@ create table if not exists landing_events (
 create index if not exists idx_interview_sessions_user_created
   on interview_sessions (user_id, created_at desc);
 
+create index if not exists idx_interview_sessions_user_attempt_consumed
+  on interview_sessions (user_id, attempt_consumed, attempt_source, created_at desc);
+
 create index if not exists idx_interview_sessions_status_scheduled
   on interview_sessions (status, scheduled_at);
 
@@ -613,29 +645,31 @@ from plans p
 join (
   values
     ('free', 'cv_jd_analysis', 'count', 'month', 3),
-    ('free', 'realtime_interview', 'session_count', 'month', 2),
+    ('free', 'realtime_interview', 'session_count', 'month', 3),
     ('free', 'realtime_interview', 'session_minutes', 'session', 10),
     ('free', 'chatbot', 'message_count', 'day', 10),
     ('free', 'coding_plan', 'generation_count', 'day', 2),
+    ('free', 'ai_code_feedback', 'attempt_count', 'month', 2),
     ('standard', 'cv_jd_analysis', 'count', 'month', 15),
     ('standard', 'realtime_interview', 'session_count', 'month', 10),
     ('standard', 'realtime_interview', 'session_minutes', 'session', 25),
     ('standard', 'chatbot', 'message_count', 'day', 50),
     ('standard', 'coding_plan', 'generation_count', 'day', 10),
+    ('standard', 'ai_code_feedback', 'attempt_count', 'month', 10),
     ('pro', 'cv_jd_analysis', 'count', 'month', 30),
     ('pro', 'realtime_interview', 'session_count', 'month', 20),
     ('pro', 'realtime_interview', 'session_minutes', 'session', 45),
     ('pro', 'chatbot', 'message_count', 'day', 150),
     ('pro', 'coding_plan', 'generation_count', 'day', 15),
+    ('pro', 'ai_code_feedback', 'attempt_count', 'month', 15),
     ('team', 'cv_jd_analysis', 'count', 'month', 30),
     ('team', 'realtime_interview', 'session_count', 'month', 20),
     ('team', 'realtime_interview', 'session_minutes', 'session', 45),
     ('team', 'chatbot', 'message_count', 'day', 150),
     ('team', 'coding_plan', 'generation_count', 'day', 15),
-    ('usage_based', 'cv_jd_analysis', 'count', 'purchase', 1),
-    ('usage_based', 'realtime_interview', 'session_count', 'purchase', 1),
+    ('team', 'ai_code_feedback', 'attempt_count', 'month', 15),
     ('usage_based', 'realtime_interview', 'session_minutes', 'session', 15),
-    ('usage_based', 'ai_code_feedback', 'attempt_count', 'purchase', 1)
+    ('usage_based', 'realtime_interview', 'session_count', 'purchase', 1)
 ) as limits(plan_code, feature_code, metric, period, limit_value) on p.code = limits.plan_code
 on conflict (plan_id, feature_code, metric, period) do update
 set limit_value = excluded.limit_value,
