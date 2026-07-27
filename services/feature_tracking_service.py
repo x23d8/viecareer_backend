@@ -2,6 +2,16 @@
 
 The raw tracking tables use implementation-level names. This service maps
 those names into business feature keys that admins can reason about.
+
+NOTE: completion_count for cv_jd_analysis, realtime_interview,
+coding_interview and action_plan is sourced directly from the underlying
+business tables (cv_jd_analyses, interview_sessions, coding_interview_submissions,
+learning_roadmaps) rather than from user_activity_events. The event log has
+been found to under-count (missing tracking calls) and over-count (duplicate
+fires with no object_id) for these features, so it can no longer be trusted
+as the source of truth for "completions". event_count/unique_users from
+user_activity_events are still used as raw activity signals, just not for
+completions.
 """
 
 from __future__ import annotations
@@ -77,6 +87,97 @@ FEATURE_DEFINITIONS: tuple[dict[str, Any], ...] = (
 
 _FEATURE_BY_KEY = {item["feature_key"]: item for item in FEATURE_DEFINITIONS}
 
+# Business tables that are the ground truth for "completions" of these
+# 4 feature keys. Anything not listed here still relies on event tracking.
+_GROUND_TRUTH_SQL = """
+  select
+    date_trunc(%s, created_at)::date as period,
+    'cv_jd_analysis' as feature_key,
+    coalesce(user_id::text, 'anonymous') as actor_key,
+    0 as event_count,
+    0 as ai_call_count,
+    1 as completion_count,
+    0 as total_tokens,
+    0::numeric as total_cost_usd
+  from cv_jd_analyses
+  where created_at >= %s and created_at < %s
+
+  union all
+
+  select
+    date_trunc(%s, coalesce(ended_at, updated_at, created_at))::date as period,
+    'realtime_interview' as feature_key,
+    coalesce(user_id::text, 'anonymous') as actor_key,
+    0, 0, 1, 0, 0::numeric
+  from interview_sessions
+  where status = 'completed'
+    and coalesce(ended_at, updated_at, created_at) >= %s
+    and coalesce(ended_at, updated_at, created_at) < %s
+
+  union all
+
+  select
+    date_trunc(%s, created_at)::date as period,
+    'coding_interview' as feature_key,
+    coalesce(user_id::text, 'anonymous') as actor_key,
+    0, 0, 1, 0, 0::numeric
+  from coding_interview_submissions
+  where created_at >= %s and created_at < %s
+
+  union all
+
+  select
+    date_trunc(%s, created_at)::date as period,
+    'action_plan' as feature_key,
+    coalesce(user_id::text, 'anonymous') as actor_key,
+    0, 0, 1, 0, 0::numeric
+  from learning_roadmaps
+  where created_at >= %s and created_at < %s
+"""
+
+# Same as above but without the period bucketing, for the totals-only query.
+_GROUND_TRUTH_TOTALS_SQL = """
+  select
+    'cv_jd_analysis' as feature_key,
+    coalesce(user_id::text, 'anonymous') as actor_key,
+    0 as event_count,
+    0 as ai_call_count,
+    1 as completion_count,
+    0 as total_tokens,
+    0::numeric as total_cost_usd
+  from cv_jd_analyses
+  where created_at >= %s and created_at < %s
+
+  union all
+
+  select
+    'realtime_interview' as feature_key,
+    coalesce(user_id::text, 'anonymous') as actor_key,
+    0, 0, 1, 0, 0::numeric
+  from interview_sessions
+  where status = 'completed'
+    and coalesce(ended_at, updated_at, created_at) >= %s
+    and coalesce(ended_at, updated_at, created_at) < %s
+
+  union all
+
+  select
+    'coding_interview' as feature_key,
+    coalesce(user_id::text, 'anonymous') as actor_key,
+    0, 0, 1, 0, 0::numeric
+  from coding_interview_submissions
+  where created_at >= %s and created_at < %s
+
+  union all
+
+  select
+    'action_plan' as feature_key,
+    coalesce(user_id::text, 'anonymous') as actor_key,
+    0, 0, 1, 0, 0::numeric
+  from learning_roadmaps
+  where created_at >= %s and created_at < %s
+"""
+
 
 def get_feature_metrics(
     *,
@@ -118,7 +219,7 @@ def get_feature_metrics(
 
 def _fetch_feature_rows(cur, start_at: datetime, end_at: datetime, group_by: FeatureGroupBy) -> list[dict[str, Any]]:
     cur.execute(
-        """
+        f"""
         with normalized_events as (
           select
             date_trunc(%s, occurred_at)::date as period,
@@ -158,18 +259,14 @@ def _fetch_feature_rows(cur, start_at: datetime, end_at: datetime, group_by: Fea
             coalesce(user_id::text, external_auth_id, 'anonymous') as actor_key,
             1 as event_count,
             0 as ai_call_count,
+            -- Completions for cv_jd_analysis / realtime_interview / coding_interview /
+            -- action_plan are no longer derived from this table (see ground_truth
+            -- CTE below). Only feature keys without a business-table equivalent
+            -- (feedback) still count completion here.
             case
-              when event_name in (
-                'cvjd_saved',
-                'interview_completed',
-                'report_saved',
-                'coding_plan_generated',
-                'action_plan_generated',
-                'coding_feedback_saved'
-              ) then 1
+              when event_name in ('report_saved', 'coding_feedback_saved') then 1
               else 0
-            end
-              as completion_count,
+            end as completion_count,
             0 as total_tokens,
             0::numeric as total_cost_usd
           from user_activity_events
@@ -193,6 +290,10 @@ def _fetch_feature_rows(cur, start_at: datetime, end_at: datetime, group_by: Fea
             0::numeric as total_cost_usd
           from landing_events
           where created_at >= %s and created_at < %s
+
+          union all
+
+          {_GROUND_TRUTH_SQL}
         )
         select
           period,
@@ -218,6 +319,11 @@ def _fetch_feature_rows(cur, start_at: datetime, end_at: datetime, group_by: Fea
             group_by,
             start_at,
             end_at,
+            # ground_truth params: (group_by, start_at, end_at) x4 tables
+            group_by, start_at, end_at,
+            group_by, start_at, end_at,
+            group_by, start_at, end_at,
+            group_by, start_at, end_at,
             tuple(_FEATURE_BY_KEY),
         ),
     )
@@ -226,7 +332,7 @@ def _fetch_feature_rows(cur, start_at: datetime, end_at: datetime, group_by: Fea
 
 def _fetch_feature_totals(cur, start_at: datetime, end_at: datetime) -> list[dict[str, Any]]:
     cur.execute(
-        """
+        f"""
         with normalized_events as (
           select
             case
@@ -265,17 +371,9 @@ def _fetch_feature_totals(cur, start_at: datetime, end_at: datetime) -> list[dic
             1 as event_count,
             0 as ai_call_count,
             case
-              when event_name in (
-                'cvjd_saved',
-                'interview_completed',
-                'report_saved',
-                'coding_plan_generated',
-                'action_plan_generated',
-                'coding_feedback_saved'
-              ) then 1
+              when event_name in ('report_saved', 'coding_feedback_saved') then 1
               else 0
-            end
-              as completion_count,
+            end as completion_count,
             0 as total_tokens,
             0::numeric as total_cost_usd
           from user_activity_events
@@ -298,6 +396,10 @@ def _fetch_feature_totals(cur, start_at: datetime, end_at: datetime) -> list[dic
             0::numeric as total_cost_usd
           from landing_events
           where created_at >= %s and created_at < %s
+
+          union all
+
+          {_GROUND_TRUTH_TOTALS_SQL}
         )
         select
           feature_key,
@@ -319,6 +421,11 @@ def _fetch_feature_totals(cur, start_at: datetime, end_at: datetime) -> list[dic
             end_at,
             start_at,
             end_at,
+            # ground_truth params: (start_at, end_at) x4 tables
+            start_at, end_at,
+            start_at, end_at,
+            start_at, end_at,
+            start_at, end_at,
             tuple(_FEATURE_BY_KEY),
         ),
     )
@@ -346,38 +453,25 @@ def _fetch_top_pages(cur, start_at: datetime, end_at: datetime) -> list[dict[str
 
 
 def _fetch_interview_dropoff(cur, start_at: datetime, end_at: datetime) -> dict[str, Any]:
+    # Sourced from interview_sessions.status directly instead of
+    # user_activity_events('interview_started'/'interview_completed'), since
+    # that event pair has the same tracking-reliability issues found
+    # elsewhere in this file, and interview_sessions already has an
+    # authoritative status column.
     cur.execute(
         """
-        with starts as (
-          select
-            id,
-            occurred_at,
-            object_id,
-            coalesce(user_id::text, external_auth_id, 'anonymous') as actor_key
-          from user_activity_events
-          where event_name = 'interview_started'
-            and occurred_at >= %s
-            and occurred_at < %s
-        ),
-        completions as (
-          select object_id, min(occurred_at) as completed_at
-          from user_activity_events
-          where event_name in ('interview_completed', 'report_saved')
-            and occurred_at >= %s
-          group by object_id
-        )
         select
-          count(*)::int as started,
-          count(distinct starts.actor_key)::int as started_users,
-          count(*) filter (where completions.object_id is not null)::int as completed,
-          count(*) filter (where completions.object_id is null)::int as abandoned,
-          count(distinct starts.actor_key) filter (where completions.object_id is null)::int as abandoned_users
-        from starts
-        left join completions
-          on completions.object_id = starts.object_id
-         and completions.completed_at >= starts.occurred_at
+          count(*) filter (where started_at is not null)::int as started,
+          count(distinct user_id) filter (where started_at is not null)::int as started_users,
+          count(*) filter (where status = 'completed')::int as completed,
+          count(*) filter (where started_at is not null and status <> 'completed')::int as abandoned,
+          count(distinct user_id) filter (
+            where started_at is not null and status <> 'completed'
+          )::int as abandoned_users
+        from interview_sessions
+        where started_at >= %s and started_at < %s
         """,
-        (start_at, end_at, start_at),
+        (start_at, end_at),
     )
     row = dict(cur.fetchone() or {})
     started = int(row.get("started") or 0)
@@ -434,7 +528,7 @@ def _feature_trend(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _summary(features: list[dict[str, Any]], dropoff: dict[str, Any]) -> dict[str, Any]:
-    top_feature = max(features, key=lambda item: item["events"], default=None)
+    top_feature = max(features, key=lambda item: item["completions"], default=None)
     by_key = {feature["feature_key"]: feature for feature in features}
     return {
         "total_events": sum(feature["events"] for feature in features),
@@ -444,11 +538,12 @@ def _summary(features: list[dict[str, Any]], dropoff: dict[str, Any]) -> dict[st
             sum(Decimal(str(feature["total_cost_usd"])) for feature in features).quantize(Decimal("0.000001"))
         ),
         "cv_uploads": by_key.get("upload_cv", {}).get("events", 0),
-        "resume_reviews": by_key.get("cv_jd_analysis", {}).get("events", 0),
+        "resume_reviews": by_key.get("cv_jd_analysis", {}).get("completions", 0),
         "completed_mock_interviews": by_key.get("realtime_interview", {}).get("completions", 0),
         "abandoned_interviews": dropoff.get("abandoned", 0),
         "most_used_feature": top_feature,
     }
+
 
 def _date_window(days: int, date_from: date | None = None, date_to: date | None = None) -> tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
