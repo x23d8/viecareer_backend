@@ -904,7 +904,6 @@ def _load_user_context(cur, external_auth_id: str | None) -> dict[str, Any] | No
         select target_position, tech_stack_json
         from cv_jd_analyses
         where user_id = %s
-          and coalesce(llm_raw_json->>'synthetic', 'false') <> 'true'
         order by created_at desc
         limit 1
         """,

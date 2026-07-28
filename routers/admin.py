@@ -414,24 +414,21 @@ def get_admin_overview(
                            count(*)::int as total_uses
                     from cv_jd_analyses
                     where created_at >= %s and created_at < %s
-                      and coalesce(llm_raw_json->>'synthetic', 'false') <> 'true'
                     union all
                     select 'ai_interview', 'AI Interview', count(*)::int
                     from interview_sessions
-                    where created_at >= %s and created_at < %s
+                    where status = 'completed'
                       and coalesce(session_type, '') <> 'coding'
+                      and coalesce(ended_at, updated_at, created_at) >= %s
+                      and coalesce(ended_at, updated_at, created_at) < %s
                     union all
                     select 'coding_interview', 'Coding Interview', count(*)::int
-                    from api_usage_logs
-                    where occurred_at >= %s and occurred_at < %s
-                      and feature = 'coding_plan'
-                      and status = 'success'
+                    from coding_interview_submissions
+                    where created_at >= %s and created_at < %s
                     union all
                     select 'personalized_action_plan', 'Personalized Action Plan', count(*)::int
-                    from user_activity_events
-                    where occurred_at >= %s and occurred_at < %s
-                      and event_name = 'action_plan_generated'
-                      and success = true
+                    from learning_roadmaps
+                    where created_at >= %s and created_at < %s
                     """
                     ,
                     (

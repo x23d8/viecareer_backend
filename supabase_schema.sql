@@ -53,6 +53,14 @@ create unique index if not exists idx_users_external_auth_id
   on users (external_auth_id)
   where external_auth_id is not null;
 
+create table if not exists ss_users (
+  user_id uuid primary key references users(id) on delete cascade,
+  cohort_code varchar(100) not null,
+  profile_no int not null,
+  created_at timestamptz not null default now(),
+  unique (cohort_code, profile_no)
+);
+
 create table if not exists user_profiles (
   id bigserial primary key,
   user_id uuid not null unique references users(id) on delete cascade,
@@ -164,7 +172,7 @@ create table if not exists cv_jd_analyses (
   user_id uuid not null references users(id) on delete cascade,
   cv_file_id uuid null references uploaded_files(id) on delete set null,
   jd_file_id uuid null references uploaded_files(id) on delete set null,
-  full_name varchar(255) null,
+  full_name varchar(255) not null,
   target_position varchar(255) null,
   education_level varchar(255) null,
   tech_stack_json jsonb not null default '[]'::jsonb,
@@ -182,8 +190,6 @@ create table if not exists cv_jd_analyses (
   d4_baseline int null check (d4_baseline between 0 and 100),
   d5_baseline int null check (d5_baseline between 0 and 100),
   llm_raw_json jsonb null,
-  is_synthetic boolean not null default false,
-  synthetic_seed varchar(100) null,
   created_at timestamptz not null default now()
 );
 
@@ -194,8 +200,64 @@ alter table cv_jd_analyses add column if not exists d2_baseline int null;
 alter table cv_jd_analyses add column if not exists d3_baseline int null;
 alter table cv_jd_analyses add column if not exists d4_baseline int null;
 alter table cv_jd_analyses add column if not exists d5_baseline int null;
-alter table cv_jd_analyses add column if not exists is_synthetic boolean not null default false;
-alter table cv_jd_analyses add column if not exists synthetic_seed varchar(100) null;
+
+update public.cv_jd_analyses as analysis
+set full_name = app_user.full_name
+from public.users as app_user
+where app_user.id = analysis.user_id
+  and analysis.full_name is distinct from app_user.full_name;
+
+alter table public.cv_jd_analyses
+  alter column full_name set not null;
+
+create or replace function public.set_cv_jd_analysis_user_full_name()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  select app_user.full_name
+  into new.full_name
+  from public.users as app_user
+  where app_user.id = new.user_id;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_set_cv_jd_analysis_user_full_name
+  on public.cv_jd_analyses;
+
+create trigger trg_set_cv_jd_analysis_user_full_name
+before insert or update of user_id, full_name
+on public.cv_jd_analyses
+for each row
+execute function public.set_cv_jd_analysis_user_full_name();
+
+create or replace function public.sync_cv_jd_analysis_user_full_name()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  update public.cv_jd_analyses
+  set full_name = new.full_name
+  where user_id = new.id
+    and full_name is distinct from new.full_name;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_sync_cv_jd_analysis_user_full_name
+  on public.users;
+
+create trigger trg_sync_cv_jd_analysis_user_full_name
+after update of full_name
+on public.users
+for each row
+when (old.full_name is distinct from new.full_name)
+execute function public.sync_cv_jd_analysis_user_full_name();
 
 create table if not exists cv_jd_gap_items (
   id bigserial primary key,
@@ -547,9 +609,6 @@ create index if not exists idx_activity_logs_type_created
 
 create index if not exists idx_cv_jd_analyses_user_created
   on cv_jd_analyses (user_id, created_at desc);
-
-create index if not exists idx_cv_jd_analyses_synthetic_created
-  on cv_jd_analyses (is_synthetic, created_at desc);
 
 create index if not exists idx_uploaded_files_user_created
   on uploaded_files (user_id, created_at desc);

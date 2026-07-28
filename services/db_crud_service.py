@@ -54,6 +54,11 @@ TABLES: tuple[TableMeta, ...] = (
         ),
     ),
     TableMeta(
+        "ss_users",
+        "user_id",
+        ("user_id", "cohort_code", "profile_no", "created_at"),
+    ),
+    TableMeta(
         "user_profiles",
         "id",
         (
