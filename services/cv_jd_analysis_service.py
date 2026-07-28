@@ -1,5 +1,7 @@
 """Persistence helpers for CV/JD analysis results."""
 
+import hashlib
+import re
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -16,6 +18,8 @@ def save_cv_jd_analysis(
     account_full_name: str,
     analysis: dict[str, Any],
     job_id: str | None = None,
+    cv_text: str | None = None,
+    jd_text: str | None = None,
     avatar_url: str | None = None,
     auth_provider: str = "clerk",
 ) -> dict[str, Any]:
@@ -47,6 +51,33 @@ def save_cv_jd_analysis(
         with get_connection() as conn:
             with conn.cursor() as cur:
                 _ensure_cv_jd_analysis_columns(cur)
+                cv_snapshot = str(cv_text or analysis.get("cvText") or "").strip() or None
+                jd_snapshot = str(jd_text or analysis.get("jdText") or "").strip() or None
+                if not jd_snapshot and job_id:
+                    cur.execute("select description from jobs where id = %s", (job_id,))
+                    job_row = cur.fetchone()
+                    jd_snapshot = (
+                        str((job_row or {}).get("description") or "").strip() or None
+                    )
+
+                input_fingerprint = cv_jd_input_fingerprint(cv_snapshot, jd_snapshot)
+                if input_fingerprint:
+                    cur.execute(
+                        """
+                        select *
+                        from cv_jd_analyses
+                        where user_id = %s
+                          and input_fingerprint = %s
+                        order by created_at desc
+                        limit 1
+                        """,
+                        (user["id"], input_fingerprint),
+                    )
+                    existing = cur.fetchone()
+                    if existing:
+                        conn.commit()
+                        return _public_analysis_row(existing)
+
                 cur.execute(
                     """
                     insert into cv_jd_analyses (
@@ -69,9 +100,16 @@ def save_cv_jd_analysis(
                       d3_baseline,
                       d4_baseline,
                       d5_baseline,
+                      cv_text_snapshot,
+                      jd_text_snapshot,
+                      input_fingerprint,
                       llm_raw_json
                     )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    values (
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s
+                    )
                     returning *
                     """,
                     (
@@ -94,6 +132,9 @@ def save_cv_jd_analysis(
                         int(baseline_dimensions["D3_problem_solving"]),
                         int(baseline_dimensions["D4_attitude"]),
                         int(baseline_dimensions["D5_cultural_fit"]),
+                        cv_snapshot,
+                        jd_snapshot,
+                        input_fingerprint,
                         Json(analysis),
                     ),
                 )
@@ -118,6 +159,16 @@ def _ensure_cv_jd_analysis_columns(cur) -> None:
     cur.execute("alter table cv_jd_analyses add column if not exists d3_baseline int null")
     cur.execute("alter table cv_jd_analyses add column if not exists d4_baseline int null")
     cur.execute("alter table cv_jd_analyses add column if not exists d5_baseline int null")
+    cur.execute("alter table cv_jd_analyses add column if not exists cv_text_snapshot text null")
+    cur.execute("alter table cv_jd_analyses add column if not exists jd_text_snapshot text null")
+    cur.execute("alter table cv_jd_analyses add column if not exists input_fingerprint varchar(64) null")
+    cur.execute(
+        """
+        create index if not exists idx_cv_jd_analyses_user_input_fingerprint
+          on cv_jd_analyses(user_id, input_fingerprint)
+          where input_fingerprint is not null
+        """
+    )
     cur.execute(
         """
         create table if not exists cv_jd_readiness_signals (
@@ -139,6 +190,19 @@ def _ensure_cv_jd_analysis_columns(cur) -> None:
 
 def _public_analysis_row(row: dict[str, Any]) -> dict[str, Any]:
     return dict(row)
+
+
+def _normalize_input_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", value or "").strip().casefold()
+
+
+def cv_jd_input_fingerprint(cv_text: str | None, jd_text: str | None) -> str | None:
+    normalized_cv = _normalize_input_text(cv_text)
+    normalized_jd = _normalize_input_text(jd_text)
+    if not normalized_cv or not normalized_jd:
+        return None
+    value = f"{normalized_cv}\x1f{normalized_jd}".encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
 
 
 def _insert_gap_items(cur, analysis_id: str, gap_analysis: list[dict[str, Any]]) -> None:

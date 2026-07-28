@@ -190,6 +190,9 @@ create table if not exists cv_jd_analyses (
   d4_baseline int null check (d4_baseline between 0 and 100),
   d5_baseline int null check (d5_baseline between 0 and 100),
   llm_raw_json jsonb null,
+  cv_text_snapshot text null,
+  jd_text_snapshot text null,
+  input_fingerprint varchar(64) null,
   created_at timestamptz not null default now()
 );
 
@@ -200,6 +203,9 @@ alter table cv_jd_analyses add column if not exists d2_baseline int null;
 alter table cv_jd_analyses add column if not exists d3_baseline int null;
 alter table cv_jd_analyses add column if not exists d4_baseline int null;
 alter table cv_jd_analyses add column if not exists d5_baseline int null;
+alter table cv_jd_analyses add column if not exists cv_text_snapshot text null;
+alter table cv_jd_analyses add column if not exists jd_text_snapshot text null;
+alter table cv_jd_analyses add column if not exists input_fingerprint varchar(64) null;
 
 update public.cv_jd_analyses as analysis
 set full_name = app_user.full_name
@@ -488,9 +494,16 @@ create table if not exists job_applications (
 create table if not exists learning_roadmaps (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete cascade,
+  cv_jd_analysis_id uuid null references cv_jd_analyses(id) on delete cascade,
+  job_id uuid null references jobs(id) on delete set null,
+  input_fingerprint varchar(64) null,
   target_role varchar(255) not null,
+  title varchar(400) null,
+  summary text null,
+  language varchar(10) not null default 'en',
   match_percent int null check (match_percent between 0 and 100),
   status varchar(20) not null check (status in ('active', 'archived')),
+  completed_at timestamptz null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -500,9 +513,16 @@ create table if not exists roadmap_tasks (
   roadmap_id uuid not null references learning_roadmaps(id) on delete cascade,
   phase_name varchar(255) null,
   task_title varchar(255) not null,
+  skill_key varchar(255) null,
+  description text null,
   task_type varchar(50) null check (task_type in ('technical', 'performance', 'behavioral')),
   duration_minutes int null,
+  expected_boost int not null default 0,
+  client_key varchar(64) null,
+  source_gap_json jsonb null,
   status varchar(20) not null check (status in ('planned', 'in_progress', 'completed', 'locked')),
+  completion_note text null,
+  completed_at timestamptz null,
   display_order int not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -609,6 +629,25 @@ create index if not exists idx_activity_logs_type_created
 
 create index if not exists idx_cv_jd_analyses_user_created
   on cv_jd_analyses (user_id, created_at desc);
+
+create index if not exists idx_cv_jd_analyses_user_fingerprint
+  on cv_jd_analyses (user_id, input_fingerprint)
+  where input_fingerprint is not null;
+
+create unique index if not exists uq_learning_roadmaps_user_input
+  on learning_roadmaps (user_id, input_fingerprint)
+  where input_fingerprint is not null;
+
+create unique index if not exists uq_learning_roadmaps_user_analysis
+  on learning_roadmaps (user_id, cv_jd_analysis_id)
+  where cv_jd_analysis_id is not null;
+
+create unique index if not exists uq_roadmap_tasks_client_key
+  on roadmap_tasks (roadmap_id, client_key)
+  where client_key is not null;
+
+create unique index if not exists uq_roadmap_tasks_display_order
+  on roadmap_tasks (roadmap_id, display_order);
 
 create index if not exists idx_uploaded_files_user_created
   on uploaded_files (user_id, created_at desc);

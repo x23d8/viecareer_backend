@@ -38,6 +38,7 @@ from services.cvjd_spam_guard import (
 )
 from services.cv_jd_analysis_service import save_cv_jd_analysis
 from services.interview_report_service import save_interview_report
+from services.roadmap_service import get_or_create_roadmap
 from services.plan_quota_service import FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, check_plan_quota
 
 router = APIRouter(tags=["analysis"])
@@ -169,7 +170,14 @@ async def save_cv_jd_analysis_route(
         avatar_url=req.avatar_url,
         auth_provider="clerk",
         job_id=str(req.job_id) if req.job_id else None,
+        cv_text=req.cv_text,
+        jd_text=req.jd_text,
         analysis=req.analysis,
+    )
+    roadmap_result = get_or_create_roadmap(
+        external_auth_id=req.external_auth_id,
+        cv_jd_analysis_id=str(row["id"]),
+        language="vi",
     )
     track_user_activity_async(
         "cvjd_saved",
@@ -183,7 +191,13 @@ async def save_cv_jd_analysis_route(
             "job_id": str(req.job_id) if req.job_id else None,
         },
     )
-    return {"data": row}
+    return {
+        "data": {
+            **row,
+            "roadmap_id": str(roadmap_result["roadmap"]["id"]),
+            "roadmap_created": roadmap_result["created"],
+        }
+    }
 
 
 @router.post("/score-interview")
