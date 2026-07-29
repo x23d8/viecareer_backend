@@ -370,7 +370,7 @@ def require_admin(
 
 
 # ---------------------------------------------------------------------------
-# WebSocket token helper (token passed as ?token= query param)
+# WebSocket token helper (Bearer header for native clients, query token for browsers)
 # ---------------------------------------------------------------------------
 
 async def verify_ws_token(
@@ -378,22 +378,32 @@ async def verify_ws_token(
     token: Optional[str] = Query(default=None, alias="token"),
 ) -> ClerkUser:
     """
-    WebSocket auth dependency — the client passes the Clerk JWT as a query
-    parameter because WebSocket headers are not reliably supported in browsers.
+    WebSocket auth dependency. Native clients should send the Clerk JWT in the
+    Authorization header. Browser clients can keep using the token query
+    parameter because browser WebSocket APIs cannot set custom headers.
 
-    Client connects to: ws://host/realtime/ws?token=<clerk_jwt>
+    Native: Authorization: Bearer <clerk_jwt>
+    Browser: ws://host/realtime/ws?token=<clerk_jwt>
     """
-    if _dev_ws_auth_enabled(token):
+    authorization = websocket.headers.get("authorization", "")
+    bearer_token = (
+        authorization[7:].strip()
+        if authorization.lower().startswith("bearer ")
+        else None
+    )
+    resolved_token = bearer_token or token
+
+    if _dev_ws_auth_enabled(resolved_token):
         return _dev_user()
 
-    if not token:
-        logger.warning("WebSocket authentication missing token query parameter: %s", _request_context(websocket))
+    if not resolved_token:
+        logger.warning("WebSocket authentication missing bearer/query token: %s", _request_context(websocket))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication token.",
         )
     try:
-        return _verify_token(token)
+        return _verify_token(resolved_token)
     except HTTPException:
-        logger.warning("WebSocket authentication rejected query token: %s", _request_context(websocket))
+        logger.warning("WebSocket authentication rejected token: %s", _request_context(websocket))
         raise
