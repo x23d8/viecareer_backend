@@ -151,6 +151,8 @@ TABLES: tuple[TableMeta, ...] = (
             "file_size_bytes",
             "storage_url",
             "extracted_text",
+            "file_purpose",
+            "content_sha256",
             "created_at",
         ),
     ),

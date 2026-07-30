@@ -19,6 +19,8 @@ class SaveCVJDAnalysisRequest(BaseModel):
     avatar_url: str | None = None
     auth_provider: str = "clerk"
     job_id: UUID | None = None
+    cv_file_id: UUID | None = None
+    jd_file_id: UUID | None = None
     analysis: dict[str, Any]
 
 

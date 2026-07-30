@@ -156,8 +156,18 @@ create table if not exists uploaded_files (
   file_size_bytes bigint not null,
   storage_url text not null,
   extracted_text text null,
+  file_purpose varchar(20) not null default 'cv'
+    check (file_purpose in ('cv', 'jd', 'other')),
+  content_sha256 varchar(64) null,
   created_at timestamptz not null default now()
 );
+
+alter table uploaded_files add column if not exists file_purpose varchar(20) not null default 'cv';
+alter table uploaded_files add column if not exists content_sha256 varchar(64) null;
+
+create unique index if not exists idx_uploaded_files_user_purpose_hash
+  on uploaded_files (user_id, file_purpose, content_sha256)
+  where content_sha256 is not null;
 
 create table if not exists cv_jd_analyses (
   id uuid primary key default gen_random_uuid(),

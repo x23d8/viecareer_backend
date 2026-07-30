@@ -16,6 +16,8 @@ def save_cv_jd_analysis(
     account_full_name: str,
     analysis: dict[str, Any],
     job_id: str | None = None,
+    cv_file_id: str | None = None,
+    jd_file_id: str | None = None,
     avatar_url: str | None = None,
     auth_provider: str = "clerk",
 ) -> dict[str, Any]:
@@ -47,10 +49,18 @@ def save_cv_jd_analysis(
         with get_connection() as conn:
             with conn.cursor() as cur:
                 _ensure_cv_jd_analysis_columns(cur)
+                owned_cv_file_id = _owned_uploaded_file_id(
+                    cur, user_id=user["id"], file_id=cv_file_id, purpose="cv"
+                )
+                owned_jd_file_id = _owned_uploaded_file_id(
+                    cur, user_id=user["id"], file_id=jd_file_id, purpose="jd"
+                )
                 cur.execute(
                     """
                     insert into cv_jd_analyses (
                       user_id,
+                      cv_file_id,
+                      jd_file_id,
                       job_id,
                       full_name,
                       target_position,
@@ -71,11 +81,16 @@ def save_cv_jd_analysis(
                       d5_baseline,
                       llm_raw_json
                     )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    values (
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
                     returning *
                     """,
                     (
                         user["id"],
+                        owned_cv_file_id,
+                        owned_jd_file_id,
                         job_id or None,
                         analysis.get("fullName"),
                         analysis.get("targetPosition"),
@@ -100,9 +115,17 @@ def save_cv_jd_analysis(
                 row = cur.fetchone()
                 _insert_gap_items(cur, row["id"], normalized_gap_analysis)
                 _insert_readiness_signals(cur, row["id"], normalized_signals)
+                _sync_analysis_profile(
+                    cur,
+                    user_id=user["id"],
+                    analysis=analysis,
+                    skill_score=int(ats_components.get("S_skill") or 0),
+                )
 
             conn.commit()
             return _public_analysis_row(row)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database operation failed.") from exc
 
@@ -137,6 +160,93 @@ def _ensure_cv_jd_analysis_columns(cur) -> None:
         )
         """
     )
+
+
+def _owned_uploaded_file_id(
+    cur,
+    *,
+    user_id: str,
+    file_id: str | None,
+    purpose: str,
+) -> str | None:
+    if not file_id:
+        return None
+    cur.execute(
+        """
+        select id
+        from uploaded_files
+        where id = %s and user_id = %s
+        limit 1
+        """,
+        (file_id, user_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail=f"Uploaded {purpose.upper()} file was not found for this user.",
+        )
+    return str(row["id"])
+
+
+def _sync_analysis_profile(
+    cur,
+    *,
+    user_id: str,
+    analysis: dict[str, Any],
+    skill_score: int,
+) -> None:
+    """Keep My Profile's target role and skill progress aligned with saved analyses."""
+    target_position = str(analysis.get("targetPosition") or "").strip() or None
+    cur.execute(
+        """
+        insert into user_profiles (user_id, target_position, updated_at)
+        values (%s, %s, now())
+        on conflict (user_id) do update set
+          target_position = coalesce(user_profiles.target_position, excluded.target_position),
+          updated_at = now()
+        """,
+        (user_id, target_position),
+    )
+
+    normalized_score = _to_int(skill_score, 0)
+    stage = (
+        "advanced"
+        if normalized_score >= 75
+        else "intermediate"
+        if normalized_score >= 45
+        else "beginner"
+    )
+    seen: set[str] = set()
+    for raw_skill in analysis.get("techStack") or []:
+        skill_name = str(raw_skill or "").strip()[:100]
+        key = skill_name.casefold()
+        if not skill_name or key in seen:
+            continue
+        seen.add(key)
+        cur.execute(
+            """
+            insert into user_skills (
+              user_id,
+              skill_name,
+              progress_percent,
+              stage,
+              trend,
+              updated_at
+            )
+            values (%s, %s, %s, %s, 'stable', now())
+            on conflict (user_id, skill_name) do update set
+              trend = case
+                when excluded.progress_percent > coalesce(user_skills.progress_percent, 0) then 'up'
+                when excluded.progress_percent < coalesce(user_skills.progress_percent, 0) then 'down'
+                else 'stable'
+              end,
+              progress_percent = excluded.progress_percent,
+              stage = excluded.stage,
+              updated_at = now()
+            """,
+            (user_id, skill_name, normalized_score, stage),
+        )
 
 
 def _public_analysis_row(row: dict[str, Any]) -> dict[str, Any]:

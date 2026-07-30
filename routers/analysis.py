@@ -169,6 +169,8 @@ async def save_cv_jd_analysis_route(
         avatar_url=req.avatar_url,
         auth_provider="clerk",
         job_id=str(req.job_id) if req.job_id else None,
+        cv_file_id=str(req.cv_file_id) if req.cv_file_id else None,
+        jd_file_id=str(req.jd_file_id) if req.jd_file_id else None,
         analysis=req.analysis,
     )
     track_user_activity_async(
@@ -181,6 +183,7 @@ async def save_cv_jd_analysis_route(
             "target_position": req.analysis.get("targetPosition"),
             "ats_score": req.analysis.get("atsScore"),
             "job_id": str(req.job_id) if req.job_id else None,
+            "cv_file_id": str(req.cv_file_id) if req.cv_file_id else None,
         },
     )
     return {"data": row}
