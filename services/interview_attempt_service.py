@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 
@@ -14,9 +15,11 @@ from core.database import get_connection
 
 INTERVIEW_ATTEMPT_PRICE_VND = 29_000
 INTERVIEW_ATTEMPT_PLAN_CODE = "usage_based"
+QUOTA_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# These values intentionally mirror the public pricing table. Included
-# allowances renew by plan period; purchased add-ons do not reset.
+# These values intentionally mirror the public pricing table. Free attempts
+# are lifetime trials, paid-plan allowances renew every calendar week, and
+# purchased add-ons never reset or expire.
 PLAN_INCLUDED_ATTEMPTS: dict[str, int] = {
     "free": 3,
     "standard": 10,
@@ -112,12 +115,13 @@ class InterviewAttemptStatus:
         }
 
     def quota_payload(self) -> dict[str, Any]:
+        period = "lifetime" if self.plan_code == "free" else "week"
         return {
             "plan_code": self.plan_code,
             "plan_name": self.plan_name,
             "feature_code": "realtime_interview",
             "metric": "session_count",
-            "period": "month" if self.plan_code == "free" else "subscription",
+            "period": period,
             "limit": self.total,
             "used": self.used,
             "remaining": self.remaining,
@@ -135,6 +139,10 @@ class InterviewAttemptReservation:
         if self.source == "purchased":
             return PURCHASED_ATTEMPT_MAX_SESSION_MINUTES
         return self.status_before.plan_max_session_minutes
+
+    @property
+    def plan_code(self) -> str:
+        return self.status_before.plan_code
 
 
 async def get_interview_attempt_status(*, external_auth_id: str) -> InterviewAttemptStatus:
@@ -206,6 +214,7 @@ def _status_for_user(cur, user_id: Any) -> InterviewAttemptStatus:
             where s.user_id = %s
               and s.attempt_consumed = true
               and coalesce(s.attempt_source, 'included') = 'included'
+              and coalesce(s.attempt_plan_code, 'free') = %s
               and (%s::timestamptz is null or s.created_at >= %s)
               and (%s::timestamptz is null or s.created_at < %s)
           ) as included_used,
@@ -221,6 +230,7 @@ def _status_for_user(cur, user_id: Any) -> InterviewAttemptStatus:
             user_id,
             INTERVIEW_ATTEMPT_PLAN_CODE,
             user_id,
+            plan.code,
             plan.period_start,
             plan.period_start,
             plan.period_end,
@@ -271,27 +281,27 @@ def _effective_attempt_plan(cur, user_id: Any) -> _AttemptPlan:
     )
     row = cur.fetchone()
     if not row:
-        now = datetime.now(timezone.utc)
-        period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        period_end = (
-            period_start.replace(year=period_start.year + 1, month=1)
-            if period_start.month == 12
-            else period_start.replace(month=period_start.month + 1)
-        )
         return _AttemptPlan(
             code="free",
             name="Free / Freemium",
             included=PLAN_INCLUDED_ATTEMPTS["free"],
-            period_start=period_start,
-            period_end=period_end,
+            period_start=None,
+            period_end=None,
         )
     code = str(row.get("code") or "free")
+    now = datetime.now(QUOTA_TIMEZONE)
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(timezone.utc)
+    week_end = week_start + timedelta(days=7)
+    subscription_start = _as_aware_datetime(row.get("start_at"))
+    subscription_end = _as_aware_datetime(row.get("end_at"))
     return _AttemptPlan(
         code=code,
         name=str(row.get("name") or code),
         included=PLAN_INCLUDED_ATTEMPTS.get(code, PLAN_INCLUDED_ATTEMPTS["free"]),
-        period_start=row.get("start_at"),
-        period_end=row.get("end_at"),
+        period_start=max(week_start, subscription_start) if subscription_start else week_start,
+        period_end=min(week_end, subscription_end) if subscription_end else week_end,
     )
 
 
@@ -335,6 +345,9 @@ def _ensure_interview_attempt_schema(cur) -> None:
         """
     )
     cur.execute(
+        "alter table interview_sessions add column if not exists attempt_plan_code varchar(50) null"
+    )
+    cur.execute(
         "alter table interview_sessions add column if not exists requested_question_count int null"
     )
     cur.execute(
@@ -352,10 +365,49 @@ def _ensure_interview_attempt_schema(cur) -> None:
     )
     cur.execute(
         """
+        update interview_sessions s
+        set attempt_plan_code = coalesce(
+          case when s.attempt_source = 'purchased' then 'usage_based' end,
+          (
+            select p.code
+            from user_subscriptions us
+            join plans p on p.id = us.plan_id
+            where us.user_id = s.user_id
+              and p.code in ('standard', 'pro', 'team')
+              and us.start_at <= s.created_at
+              and (us.end_at is null or us.end_at > s.created_at)
+            order by
+              case p.code when 'team' then 3 when 'pro' then 2 when 'standard' then 1 else 0 end desc,
+              us.start_at desc,
+              us.id desc
+            limit 1
+          ),
+          'free'
+        )
+        where s.attempt_consumed = true
+          and s.attempt_plan_code is null
+        """
+    )
+    cur.execute(
+        """
         create index if not exists idx_interview_sessions_user_attempt_consumed
         on interview_sessions (user_id, attempt_consumed, attempt_source, created_at desc)
         """
     )
+    cur.execute(
+        """
+        create index if not exists idx_interview_sessions_user_attempt_plan
+        on interview_sessions (user_id, attempt_plan_code, attempt_consumed, created_at desc)
+        """
+    )
+
+
+def _as_aware_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _raise_attempts_exhausted(current: InterviewAttemptStatus) -> None:

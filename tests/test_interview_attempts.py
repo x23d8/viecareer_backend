@@ -36,6 +36,20 @@ class InterviewAttemptTests(unittest.TestCase):
         self.assertEqual(result.price_vnd, 29_000)
         self.assertIn("pt.status = 'paid'", cursor.queries[1][0])
         self.assertIn("s.attempt_consumed = true", cursor.queries[1][0])
+        self.assertIn("s.attempt_plan_code", cursor.queries[1][0])
+
+    def test_free_attempts_are_lifetime_and_never_have_a_reset(self):
+        cursor = SequenceCursor([
+            None,
+            {"purchased": 0, "included_used": 1, "purchased_used": 0},
+        ])
+
+        result = _status_for_user(cursor, "user-id")
+
+        self.assertIsNone(result.period_start)
+        self.assertIsNone(result.period_end)
+        self.assertEqual(result.quota_payload()["period"], "lifetime")
+        self.assertIsNone(result.quota_payload()["reset_at"])
 
     def test_attempt_payload_is_non_refundable(self):
         payload = InterviewAttemptStatus(
@@ -67,6 +81,8 @@ class InterviewAttemptTests(unittest.TestCase):
         self.assertEqual(result.included, 10)
         self.assertEqual(result.included_remaining, 6)
         self.assertEqual(result.plan_max_session_minutes, 25)
+        self.assertEqual(result.quota_payload()["period"], "week")
+        self.assertLessEqual((result.period_end - result.period_start).days, 7)
 
     def test_purchased_attempt_is_used_after_plan_quota_and_has_15_minute_limit(self):
         cursor = SequenceCursor([

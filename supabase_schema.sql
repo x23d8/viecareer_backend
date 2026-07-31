@@ -91,12 +91,18 @@ create table if not exists plan_feature_limits (
   plan_id bigint not null references plans(id) on delete cascade,
   feature_code varchar(60) not null,
   metric varchar(40) not null,
-  period varchar(20) not null check (period in ('day', 'month', 'session', 'purchase')),
+  period varchar(20) not null check (period in ('lifetime', 'day', 'week', 'month', 'session', 'purchase')),
   limit_value int null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (plan_id, feature_code, metric, period)
 );
+
+alter table plan_feature_limits
+  drop constraint if exists plan_feature_limits_period_check;
+alter table plan_feature_limits
+  add constraint plan_feature_limits_period_check
+  check (period in ('lifetime', 'day', 'week', 'month', 'session', 'purchase'));
 
 create table if not exists payment_transactions (
   id bigserial primary key,
@@ -265,6 +271,7 @@ alter table interview_sessions add column if not exists context_json jsonb null;
 alter table interview_sessions add column if not exists attempt_consumed boolean not null default false;
 alter table interview_sessions add column if not exists attempt_source varchar(20) null
   check (attempt_source in ('included', 'purchased'));
+alter table interview_sessions add column if not exists attempt_plan_code varchar(50) null;
 alter table interview_sessions add column if not exists requested_question_count int null;
 alter table interview_sessions add column if not exists requested_duration_seconds int null;
 
@@ -546,6 +553,9 @@ create index if not exists idx_interview_sessions_user_created
 create index if not exists idx_interview_sessions_user_attempt_consumed
   on interview_sessions (user_id, attempt_consumed, attempt_source, created_at desc);
 
+create index if not exists idx_interview_sessions_user_attempt_plan
+  on interview_sessions (user_id, attempt_plan_code, attempt_consumed, created_at desc);
+
 create index if not exists idx_interview_sessions_status_scheduled
   on interview_sessions (status, scheduled_at);
 
@@ -654,30 +664,30 @@ select p.id, limits.feature_code, limits.metric, limits.period, limits.limit_val
 from plans p
 join (
   values
-    ('free', 'cv_jd_analysis', 'count', 'month', 3),
-    ('free', 'realtime_interview', 'session_count', 'month', 3),
+    ('free', 'cv_jd_analysis', 'count', 'lifetime', 3),
+    ('free', 'realtime_interview', 'session_count', 'lifetime', 3),
     ('free', 'realtime_interview', 'session_minutes', 'session', 10),
-    ('free', 'chatbot', 'message_count', 'day', 10),
-    ('free', 'coding_plan', 'generation_count', 'day', 2),
-    ('free', 'ai_code_feedback', 'attempt_count', 'month', 2),
-    ('standard', 'cv_jd_analysis', 'count', 'month', 15),
-    ('standard', 'realtime_interview', 'session_count', 'month', 10),
+    ('free', 'chatbot', 'message_count', 'lifetime', 3),
+    ('free', 'coding_plan', 'generation_count', 'lifetime', 3),
+    ('free', 'ai_code_feedback', 'attempt_count', 'lifetime', 3),
+    ('standard', 'cv_jd_analysis', 'count', 'week', 15),
+    ('standard', 'realtime_interview', 'session_count', 'week', 10),
     ('standard', 'realtime_interview', 'session_minutes', 'session', 25),
     ('standard', 'chatbot', 'message_count', 'day', 50),
-    ('standard', 'coding_plan', 'generation_count', 'day', 10),
-    ('standard', 'ai_code_feedback', 'attempt_count', 'month', 10),
-    ('pro', 'cv_jd_analysis', 'count', 'month', 30),
-    ('pro', 'realtime_interview', 'session_count', 'month', 20),
+    ('standard', 'coding_plan', 'generation_count', 'week', 10),
+    ('standard', 'ai_code_feedback', 'attempt_count', 'week', 10),
+    ('pro', 'cv_jd_analysis', 'count', 'week', 30),
+    ('pro', 'realtime_interview', 'session_count', 'week', 20),
     ('pro', 'realtime_interview', 'session_minutes', 'session', 45),
     ('pro', 'chatbot', 'message_count', 'day', 150),
-    ('pro', 'coding_plan', 'generation_count', 'day', 15),
-    ('pro', 'ai_code_feedback', 'attempt_count', 'month', 15),
-    ('team', 'cv_jd_analysis', 'count', 'month', 30),
-    ('team', 'realtime_interview', 'session_count', 'month', 20),
+    ('pro', 'coding_plan', 'generation_count', 'week', 15),
+    ('pro', 'ai_code_feedback', 'attempt_count', 'week', 15),
+    ('team', 'cv_jd_analysis', 'count', 'week', 30),
+    ('team', 'realtime_interview', 'session_count', 'week', 20),
     ('team', 'realtime_interview', 'session_minutes', 'session', 45),
     ('team', 'chatbot', 'message_count', 'day', 150),
-    ('team', 'coding_plan', 'generation_count', 'day', 15),
-    ('team', 'ai_code_feedback', 'attempt_count', 'month', 15),
+    ('team', 'coding_plan', 'generation_count', 'week', 15),
+    ('team', 'ai_code_feedback', 'attempt_count', 'week', 15),
     ('usage_based', 'realtime_interview', 'session_minutes', 'session', 15),
     ('usage_based', 'realtime_interview', 'session_count', 'purchase', 1)
 ) as limits(plan_code, feature_code, metric, period, limit_value) on p.code = limits.plan_code

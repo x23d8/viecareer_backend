@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 
@@ -30,6 +31,7 @@ METRIC_GENERATION_COUNT = "generation_count"
 METRIC_ATTEMPT_COUNT = "attempt_count"
 
 PLAN_USAGE_BASED = "usage_based"
+QUOTA_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
 _schema_lock = Lock()
 _schema_ready = False
@@ -91,30 +93,32 @@ _DEFAULT_PLANS: tuple[tuple[str, str, str, int, int, str, int], ...] = (
 )
 
 _DEFAULT_LIMITS: tuple[tuple[str, str, str, str, int | None], ...] = (
-    ("free", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "month", 3),
-    ("free", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 3),
+    # Free allowances are one-time trials. A calendar boundary, logout, plan
+    # expiry, or a new request must never restore them.
+    ("free", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "lifetime", 3),
+    ("free", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "lifetime", 3),
     ("free", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 10),
-    ("free", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "day", 10),
-    ("free", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "day", 2),
-    ("free", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "month", 2),
-    ("standard", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "month", 15),
-    ("standard", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 10),
+    ("free", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "lifetime", 3),
+    ("free", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "lifetime", 3),
+    ("free", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "lifetime", 3),
+    ("standard", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "week", 15),
+    ("standard", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "week", 10),
     ("standard", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 25),
     ("standard", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "day", 50),
-    ("standard", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "day", 10),
-    ("standard", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "month", 10),
-    ("pro", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "month", 30),
-    ("pro", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 20),
+    ("standard", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "week", 10),
+    ("standard", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "week", 10),
+    ("pro", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "week", 30),
+    ("pro", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "week", 20),
     ("pro", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 45),
     ("pro", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "day", 150),
-    ("pro", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "day", 15),
-    ("pro", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "month", 15),
-    ("team", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "month", 30),
-    ("team", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "month", 20),
+    ("pro", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "week", 15),
+    ("pro", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "week", 15),
+    ("team", FEATURE_CV_JD_ANALYSIS, METRIC_COUNT, "week", 30),
+    ("team", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "week", 20),
     ("team", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 45),
     ("team", FEATURE_CHATBOT, METRIC_MESSAGE_COUNT, "day", 150),
-    ("team", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "day", 15),
-    ("team", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "month", 15),
+    ("team", FEATURE_CODING_PLAN, METRIC_GENERATION_COUNT, "week", 15),
+    ("team", FEATURE_AI_CODE_FEEDBACK, METRIC_ATTEMPT_COUNT, "week", 15),
     ("usage_based", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_COUNT, "purchase", 1),
     ("usage_based", FEATURE_REALTIME_INTERVIEW, METRIC_SESSION_MINUTES, "session", 15),
 )
@@ -358,12 +362,20 @@ def _ensure_quota_schema(cur) -> None:
               plan_id bigint not null references plans(id) on delete cascade,
               feature_code varchar(60) not null,
               metric varchar(40) not null,
-              period varchar(20) not null check (period in ('day', 'month', 'session', 'purchase')),
+              period varchar(20) not null check (period in ('lifetime', 'day', 'week', 'month', 'session', 'purchase')),
               limit_value int null,
               created_at timestamptz not null default now(),
               updated_at timestamptz not null default now(),
               unique (plan_id, feature_code, metric, period)
             )
+            """
+        )
+        cur.execute("alter table plan_feature_limits drop constraint if exists plan_feature_limits_period_check")
+        cur.execute(
+            """
+            alter table plan_feature_limits
+            add constraint plan_feature_limits_period_check
+            check (period in ('lifetime', 'day', 'week', 'month', 'session', 'purchase'))
             """
         )
         cur.execute(
@@ -405,22 +417,26 @@ def _seed_plans(cur) -> None:
 
 
 def _seed_limits(cur) -> None:
+    # Reconcile the product catalogue exactly. Keeping an old monthly row next
+    # to a new weekly/lifetime row makes LIMIT 1 non-deterministic and can
+    # accidentally restore a trial allowance.
     cur.execute(
         """
         delete from plan_feature_limits l
         using plans p
         where l.plan_id = p.id
-          and p.code = %s
-          and not (
-            l.feature_code = %s
-            and l.metric in (%s, %s)
-          )
+          and p.code = any(%s)
+          and l.feature_code = any(%s)
         """,
         (
-            PLAN_USAGE_BASED,
-            FEATURE_REALTIME_INTERVIEW,
-            METRIC_SESSION_COUNT,
-            METRIC_SESSION_MINUTES,
+            [plan[0] for plan in _DEFAULT_PLANS],
+            [
+                FEATURE_CV_JD_ANALYSIS,
+                FEATURE_REALTIME_INTERVIEW,
+                FEATURE_CHATBOT,
+                FEATURE_CODING_PLAN,
+                FEATURE_AI_CODE_FEEDBACK,
+            ],
         ),
     )
     for plan_code, feature_code, metric, period, limit_value in _DEFAULT_LIMITS:
@@ -436,7 +452,9 @@ def _seed_limits(cur) -> None:
             select p.id, %s, %s, %s, %s
             from plans p
             where p.code = %s
-            on conflict (plan_id, feature_code, metric, period) do nothing
+            on conflict (plan_id, feature_code, metric, period) do update
+            set limit_value = excluded.limit_value,
+                updated_at = now()
             """,
             (feature_code, metric, period, limit_value, plan_code),
         )
@@ -603,20 +621,51 @@ def _realtime_session_count(cur, external_auth_id: str, window_start: datetime |
 
 
 def _window_for_period(period: str, plan: _Plan) -> tuple[datetime | None, datetime | None]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(QUOTA_TIMEZONE)
+    if period == "lifetime":
+        return None, None
     if period == "day":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return start, start + timedelta(days=1)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        return _bound_window_to_subscription(start, start + timedelta(days=1), plan)
+    if period == "week":
+        start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(timezone.utc)
+        return _bound_window_to_subscription(start, start + timedelta(days=7), plan)
     if period == "month":
-        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        if start.month == 12:
-            reset_at = start.replace(year=start.year + 1, month=1)
+        local_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if local_start.month == 12:
+            local_reset_at = local_start.replace(year=local_start.year + 1, month=1)
         else:
-            reset_at = start.replace(month=start.month + 1)
-        return start, reset_at
+            local_reset_at = local_start.replace(month=local_start.month + 1)
+        start = local_start.astimezone(timezone.utc)
+        reset_at = local_reset_at.astimezone(timezone.utc)
+        return _bound_window_to_subscription(start, reset_at, plan)
     if period == "purchase":
         return plan.subscription_started_at, plan.subscription_ends_at
     return None, None
+
+
+def _bound_window_to_subscription(
+    start: datetime,
+    reset_at: datetime,
+    plan: _Plan,
+) -> tuple[datetime, datetime]:
+    subscription_start = _as_aware_datetime(plan.subscription_started_at)
+    subscription_end = _as_aware_datetime(plan.subscription_ends_at)
+    if subscription_start:
+        start = max(start, subscription_start)
+    if subscription_end:
+        reset_at = min(reset_at, subscription_end)
+    return start, reset_at
+
+
+def _as_aware_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _unlimited_decision(plan_code: str, plan_name: str, feature_code: str, metric: str) -> QuotaDecision:
@@ -647,7 +696,9 @@ def _raise_quota_exceeded(decision: QuotaDecision) -> None:
 
 def _quota_message(decision: QuotaDecision) -> str:
     period_label = {
+        "lifetime": "lifetime",
         "day": "daily",
+        "week": "weekly",
         "month": "monthly",
         "purchase": "purchase",
         "session": "session",

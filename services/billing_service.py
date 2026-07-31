@@ -46,6 +46,81 @@ CHECKOUT_PLAN_CODES = {"standard", "pro", "team", "usage_based"}
 RECURRING_PLAN_CODES = {"standard", "pro", "team"}
 PLAN_PRIORITY = {"team": 400, "pro": 300, "standard": 200, "free": 100, "usage_based": 50}
 
+_PLAN_PRESENTATION: dict[str, dict[str, Any]] = {
+    "free": {
+        "tagline": "Dùng thử các tính năng AI cốt lõi",
+        "audience": "Mỗi tài khoản mới",
+        "quota_scope": "per_account",
+        "reset_note": "Mỗi tính năng có 3 lượt dùng thử trọn đời; không tự đặt lại.",
+    },
+    "standard": {
+        "tagline": "Phù hợp Intern / Fresher",
+        "audience": "1 người dùng",
+        "quota_scope": "per_member",
+        "reset_note": "Hạn mức tuần đặt lại lúc 00:00 thứ Hai; tin nhắn đặt lại lúc 00:00 mỗi ngày (giờ Việt Nam).",
+    },
+    "pro": {
+        "tagline": "Phù hợp Middle / Senior",
+        "audience": "1 người dùng",
+        "quota_scope": "per_member",
+        "reset_note": "Hạn mức tuần đặt lại lúc 00:00 thứ Hai; tin nhắn đặt lại lúc 00:00 mỗi ngày (giờ Việt Nam).",
+    },
+    "team": {
+        "tagline": "Dành cho nhóm tối đa 5 thành viên",
+        "audience": "5 thành viên",
+        "quota_scope": "per_member",
+        "reset_note": "Mỗi thành viên có hạn mức riêng như Premium; không dùng chung quota.",
+    },
+    "usage_based": {
+        "tagline": "Mua thêm một lượt phỏng vấn",
+        "audience": "Bất kỳ tài khoản nào",
+        "quota_scope": "per_purchase",
+        "reset_note": "Lượt mua thêm không hết hạn, không đặt lại và không hoàn lại sau khi bắt đầu phiên.",
+    },
+}
+
+_LIMIT_PRESENTATION: dict[tuple[str, str], dict[str, str]] = {
+    ("cv_jd_analysis", "count"): {
+        "label": "Phân tích CV & mô tả công việc",
+        "unit_label": "lượt phân tích",
+        "consumption_rule": "Tính 1 lượt khi yêu cầu phân tích hoàn tất thành công, kể cả kết quả lấy từ bộ nhớ đệm.",
+    },
+    ("realtime_interview", "session_count"): {
+        "label": "Phỏng vấn AI",
+        "unit_label": "phiên phỏng vấn",
+        "consumption_rule": "Tính 1 lượt ngay khi phiên được tạo; hủy, mất kết nối hoặc gọi lại API không hoàn lượt.",
+    },
+    ("realtime_interview", "session_minutes"): {
+        "label": "Thời lượng tối đa mỗi phỏng vấn",
+        "unit_label": "phút / phiên",
+        "consumption_rule": "Đây là thời lượng tối đa của từng phiên, không phải một ví phút dùng chung.",
+    },
+    ("chatbot", "message_count"): {
+        "label": "Tin nhắn VieBot",
+        "unit_label": "tin nhắn",
+        "consumption_rule": "Tính 1 lượt cho mỗi tin nhắn VieBot được xử lý thành công.",
+    },
+    ("coding_plan", "generation_count"): {
+        "label": "Tạo bài phỏng vấn coding",
+        "unit_label": "lượt tạo đề",
+        "consumption_rule": "Tính 1 lượt cho mỗi bộ thử thách coding được tạo thành công.",
+    },
+    ("ai_code_feedback", "attempt_count"): {
+        "label": "Nhận xét code bằng AI",
+        "unit_label": "lượt chấm code",
+        "consumption_rule": "Tính 1 lượt cho mỗi bài code được AI đánh giá thành công.",
+    },
+}
+
+_PERIOD_PRESENTATION = {
+    "lifetime": ("trọn đời", "Không đặt lại"),
+    "day": ("mỗi ngày", "Đặt lại lúc 00:00 mỗi ngày, giờ Việt Nam"),
+    "week": ("mỗi tuần", "Đặt lại lúc 00:00 thứ Hai, giờ Việt Nam"),
+    "month": ("mỗi tháng", "Đặt lại đầu tháng"),
+    "session": ("mỗi phiên", "Áp dụng riêng cho từng phiên"),
+    "purchase": ("mỗi lần mua", "Không hết hạn; mỗi giao dịch thành công cộng 1 lượt"),
+}
+
 PAYOS_PAID_STATUS = "PAID"
 PAYOS_CANCELLED_STATUS = "CANCELLED"
 PAYOS_EXPIRED_STATUS = "EXPIRED"
@@ -908,7 +983,7 @@ def _list_plans(cur) -> list[dict[str, Any]]:
             """,
             (plan["id"],),
         )
-        plan["limits"] = [dict(row) for row in cur.fetchall()]
+        plan["limits"] = [_limit_payload(row) for row in cur.fetchall()]
     return plans
 
 
@@ -1065,6 +1140,7 @@ def _payment_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _plan_payload(row: dict[str, Any]) -> dict[str, Any]:
+    code = str(row["code"])
     return {
         "id": row["id"],
         "code": row["code"],
@@ -1074,7 +1150,19 @@ def _plan_payload(row: dict[str, Any]) -> dict[str, Any]:
         "included_members": row["included_members"],
         "quota_total": row.get("quota_total"),
         "rate_limit_per_minute": row.get("rate_limit_per_minute"),
+        **_PLAN_PRESENTATION.get(code, {}),
     }
+
+
+def _limit_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    key = (str(row.get("feature_code") or ""), str(row.get("metric") or ""))
+    period = str(row.get("period") or "")
+    period_label, reset_policy = _PERIOD_PRESENTATION.get(period, (period, ""))
+    payload.update(_LIMIT_PRESENTATION.get(key, {}))
+    payload["period_label"] = period_label
+    payload["reset_policy"] = reset_policy
+    return payload
 
 
 def _payos_signature(data: dict[str, Any]) -> str:

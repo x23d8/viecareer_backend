@@ -72,6 +72,7 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
             )
             context_snapshot["duration_minutes"] = effective_duration_seconds // 60
             context_snapshot["attempt_source"] = reservation.source
+            context_snapshot["attempt_plan_code"] = reservation.plan_code
             context_snapshot["session_max_minutes"] = reservation.max_session_minutes
             cur.execute(
                 """
@@ -92,6 +93,7 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                   context_json,
                   attempt_consumed,
                   attempt_source,
+                  attempt_plan_code,
                   requested_question_count,
                   requested_duration_seconds
                 )
@@ -99,7 +101,7 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                   %s, %s, %s, %s,
                   (select company_name from jobs where id = %s),
                   %s, 'in_progress', now(), %s, %s, %s, %s, %s, %s,
-                  true, %s, %s, %s
+                  true, %s, %s, %s, %s
                 )
                 returning id
                 """,
@@ -117,6 +119,7 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
                     Json(blueprint),
                     Json(context_snapshot),
                     reservation.source,
+                    reservation.plan_code if reservation.source == "included" else "usage_based",
                     question_count,
                     effective_duration_seconds,
                 ),
