@@ -50,6 +50,7 @@ class UserLinkingSecurityTests(unittest.TestCase):
         self.assertFalse(connection.cursor_instance.email_lookup_attempted)
         self.assertEqual(result["role_id"], 2)
         self.assertEqual(result["role"], "user")
+        self.assertFalse(result["unlimited_access"])
 
     def test_existing_admin_role_is_returned_from_database(self):
         connection = FakeConnection(
@@ -70,6 +71,7 @@ class UserLinkingSecurityTests(unittest.TestCase):
 
         self.assertEqual(result["role_id"], 1)
         self.assertEqual(result["role"], "admin")
+        self.assertTrue(result["unlimited_access"])
 
 
     def test_verified_email_relinks_when_previous_clerk_user_is_deleted(self):

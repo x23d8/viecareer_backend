@@ -709,15 +709,23 @@ def _raise_quota_exceeded(decision: QuotaDecision) -> None:
 
 
 def _quota_message(decision: QuotaDecision) -> str:
+    feature_label = {
+        FEATURE_CV_JD_ANALYSIS: "Phân tích CV/JD",
+        FEATURE_REALTIME_INTERVIEW: "Phỏng vấn AI",
+        FEATURE_CHATBOT: "VieBot",
+        FEATURE_CODING_PLAN: "Lộ trình coding",
+        FEATURE_AI_CODE_FEEDBACK: "Đánh giá code AI",
+    }.get(decision.feature_code, decision.feature_code)
     period_label = {
-        "lifetime": "lifetime",
-        "day": "daily",
-        "week": "weekly",
-        "month": "monthly",
-        "purchase": "purchase",
-        "session": "session",
+        "lifetime": "trọn đời",
+        "day": "trong ngày",
+        "week": "trong tuần",
+        "month": "trong tháng",
+        "purchase": "đã mua",
+        "session": "trong phiên",
     }.get(decision.period, decision.period)
+    limit = decision.limit_value if decision.limit_value is not None else 0
     return (
-        f"{decision.plan_name} {period_label} quota reached for "
-        f"{decision.feature_code}.{decision.metric}."
+        f"Bạn đã dùng hết {limit} lượt {feature_label} của gói {decision.plan_name} "
+        f"({period_label}). Số lượt còn lại: 0."
     )

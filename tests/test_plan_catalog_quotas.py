@@ -3,7 +3,15 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from services.billing_service import _limit_payload, _plan_payload
-from services.plan_quota_service import _DEFAULT_LIMITS, _Plan, _window_for_period
+from services.plan_quota_service import (
+    FEATURE_CV_JD_ANALYSIS,
+    METRIC_COUNT,
+    QuotaDecision,
+    _DEFAULT_LIMITS,
+    _Plan,
+    _quota_message,
+    _window_for_period,
+)
 
 
 class PlanCatalogQuotaTests(unittest.TestCase):
@@ -67,6 +75,28 @@ class PlanCatalogQuotaTests(unittest.TestCase):
         self.assertIn("không hoàn lượt", limit["consumption_rule"])
         self.assertEqual(plan["quota_scope"], "per_member")
         self.assertIn("thứ Hai", plan["reset_note"])
+
+    def test_exhausted_quota_message_is_clear_and_localized(self):
+        message = _quota_message(
+            QuotaDecision(
+                allowed=False,
+                plan_code="free",
+                plan_name="Free / Freemium",
+                feature_code=FEATURE_CV_JD_ANALYSIS,
+                metric=METRIC_COUNT,
+                period="lifetime",
+                limit_value=3,
+                used=3,
+                remaining=0,
+                reset_at=None,
+            )
+        )
+
+        self.assertEqual(
+            message,
+            "Bạn đã dùng hết 3 lượt Phân tích CV/JD của gói Free / Freemium "
+            "(trọn đời). Số lượt còn lại: 0.",
+        )
 
 
 if __name__ == "__main__":

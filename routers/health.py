@@ -10,6 +10,8 @@ from core.database import get_connection
 
 router = APIRouter(tags=["health"])
 
+ACCESS_CONTRACT = "supabase-role-admin-unlimited-v3"
+
 
 def _check_database() -> None:
     with get_connection() as conn:
@@ -27,7 +29,7 @@ def home():
 
 @router.get("/health/live")
 def live():
-    return {"status": "alive"}
+    return {"status": "alive", "access_contract": ACCESS_CONTRACT}
 
 
 @router.get("/health/ready")
@@ -54,4 +56,8 @@ async def ready():
             content={"status": "not_ready", "database": "unavailable"},
         )
 
-    return {"status": "ready", "database": "available"}
+    return {
+        "status": "ready",
+        "database": "available",
+        "access_contract": ACCESS_CONTRACT,
+    }

@@ -340,4 +340,5 @@ def _with_database_role(cur, row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     # Unknown/custom roles fail closed to normal-user capabilities on clients.
     payload["role"] = "admin" if role_row.get("role") == "admin" else "user"
+    payload["unlimited_access"] = payload["role"] == "admin"
     return payload
