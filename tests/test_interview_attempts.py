@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
@@ -50,6 +51,27 @@ class InterviewAttemptTests(unittest.TestCase):
         self.assertIsNone(result.period_end)
         self.assertEqual(result.quota_payload()["period"], "lifetime")
         self.assertIsNone(result.quota_payload()["reset_at"])
+
+    def test_existing_free_user_gets_three_attempts_after_one_time_grant(self):
+        granted_at = datetime(2026, 7, 31, tzinfo=timezone.utc)
+        cursor = SequenceCursor([
+            {
+                "code": None,
+                "name": None,
+                "start_at": None,
+                "end_at": None,
+                "free_interview_attempts_granted_at": granted_at,
+            },
+            {"purchased": 0, "included_used": 0, "purchased_used": 0},
+        ])
+
+        result = _status_for_user(cursor, "existing-user-id")
+
+        self.assertEqual(result.included, 3)
+        self.assertEqual(result.remaining, 3)
+        self.assertEqual(result.period_start, granted_at)
+        self.assertIsNone(result.period_end)
+        self.assertEqual(cursor.queries[1][1][4], granted_at)
 
     def test_attempt_payload_is_non_refundable(self):
         payload = InterviewAttemptStatus(

@@ -28,6 +28,7 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
         avatar_url=metadata.get("avatar_url"),
         auth_provider=str(metadata.get("auth_provider") or "clerk"),
     )
+    ensure_interview_attempt_schema()
     candidate = metadata.get("candidate") if isinstance(metadata.get("candidate"), dict) else {}
     position = str(metadata.get("position") or "Software Developer")
     job_description = str(metadata.get("job_description") or metadata.get("jd_summary") or "")

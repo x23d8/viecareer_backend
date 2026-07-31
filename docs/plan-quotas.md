@@ -16,6 +16,9 @@ Chu kỳ ngày và tuần dùng múi giờ `Asia/Ho_Chi_Minh`. Hạn mức ngày
 
 - Free: ba lượt được tính riêng cho từng tính năng, gắn với tài khoản và không có
   `reset_at`. Đăng xuất, gọi lại API, hết tháng hoặc hết tuần không phục hồi lượt.
+- Tài khoản tồn tại trước ngày áp dụng chính sách được cấp một mốc dùng thử mới
+  đúng một lần, vì vậy mỗi tài khoản cũ nhận lại đủ 3 lượt phỏng vấn. Mốc này
+  được lưu ở database và không thay đổi khi deploy lại hoặc gọi API.
 - Phỏng vấn AI: trừ ngay khi backend tạo phiên. Hủy phiên, đóng trình duyệt hoặc
   mất kết nối không hoàn lượt.
 - Phân tích CV/JD, VieBot, tạo đề coding và chấm code: tính một lượt khi tác vụ

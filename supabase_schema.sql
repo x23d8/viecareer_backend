@@ -48,6 +48,7 @@ alter table users add column if not exists terms_accepted_at timestamptz null;
 alter table users add column if not exists terms_version varchar(50) null;
 alter table users add column if not exists privacy_policy_accepted_at timestamptz null;
 alter table users add column if not exists privacy_policy_version varchar(50) null;
+alter table users add column if not exists free_interview_attempts_granted_at timestamptz not null default now();
 
 create unique index if not exists idx_users_external_auth_id
   on users (external_auth_id)

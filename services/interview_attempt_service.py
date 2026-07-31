@@ -258,23 +258,34 @@ def _status_for_user(cur, user_id: Any) -> InterviewAttemptStatus:
 def _effective_attempt_plan(cur, user_id: Any) -> _AttemptPlan:
     cur.execute(
         """
-        select p.code, p.name, s.start_at, s.end_at
-        from user_subscriptions s
-        join plans p on p.id = s.plan_id
-        where s.user_id = %s
-          and s.status = 'active'
-          and s.start_at <= now()
-          and (s.end_at is null or s.end_at > now())
-          and p.code in ('standard', 'pro', 'team')
-        order by
-          case p.code
-            when 'team' then 3
-            when 'pro' then 2
-            when 'standard' then 1
-            else 0
-          end desc,
-          s.start_at desc,
-          s.id desc
+        select
+          active_plan.code,
+          active_plan.name,
+          active_plan.start_at,
+          active_plan.end_at,
+          u.free_interview_attempts_granted_at
+        from users u
+        left join lateral (
+          select p.code, p.name, s.start_at, s.end_at, s.id
+          from user_subscriptions s
+          join plans p on p.id = s.plan_id
+          where s.user_id = u.id
+            and s.status = 'active'
+            and s.start_at <= now()
+            and (s.end_at is null or s.end_at > now())
+            and p.code in ('standard', 'pro', 'team')
+          order by
+            case p.code
+              when 'team' then 3
+              when 'pro' then 2
+              when 'standard' then 1
+              else 0
+            end desc,
+            s.start_at desc,
+            s.id desc
+          limit 1
+        ) active_plan on true
+        where u.id = %s
         limit 1
         """,
         (user_id,),
@@ -289,6 +300,14 @@ def _effective_attempt_plan(cur, user_id: Any) -> _AttemptPlan:
             period_end=None,
         )
     code = str(row.get("code") or "free")
+    if code == "free":
+        return _AttemptPlan(
+            code="free",
+            name="Free / Freemium",
+            included=PLAN_INCLUDED_ATTEMPTS["free"],
+            period_start=_as_aware_datetime(row.get("free_interview_attempts_granted_at")),
+            period_end=None,
+        )
     now = datetime.now(QUOTA_TIMEZONE)
     week_start = (now - timedelta(days=now.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -334,6 +353,12 @@ def ensure_interview_attempt_schema() -> None:
 
 
 def _ensure_interview_attempt_schema(cur) -> None:
+    cur.execute(
+        """
+        alter table users
+        add column if not exists free_interview_attempts_granted_at timestamptz not null default now()
+        """
+    )
     cur.execute(
         "alter table interview_sessions add column if not exists attempt_consumed boolean not null default false"
     )
