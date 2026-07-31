@@ -198,6 +198,7 @@ def get_billing_overview(*, external_auth_id: str, email: str | None) -> dict[st
                     "recent_payments": [],
                     "quota_summary": quota_summary,
                     "interview_attempts": interview_attempts.payload(),
+                    "unlimited_access": interview_attempts.unlimited,
                 }
 
             subscription = _current_subscription(cur, user["id"])
@@ -211,6 +212,7 @@ def get_billing_overview(*, external_auth_id: str, email: str | None) -> dict[st
         "recent_payments": payments,
         "quota_summary": quota_summary,
         "interview_attempts": interview_attempts.payload(),
+        "unlimited_access": interview_attempts.unlimited,
     }
 
 

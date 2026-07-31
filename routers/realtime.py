@@ -71,7 +71,7 @@ async def start_realtime_session(
     verified_request_email(current_user, str(payload.email))
     metadata = payload.model_dump(mode="json")
 
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     # Creating the persisted session consumes one attempt in the same database
     # transaction. The attempt is intentionally not refunded on early exit.
     session_id = await asyncio.to_thread(create_live_interview_session, metadata)

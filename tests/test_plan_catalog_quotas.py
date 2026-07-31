@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from services.billing_service import _limit_payload, _plan_payload
@@ -28,10 +29,14 @@ class PlanCatalogQuotaTests(unittest.TestCase):
         self.assertEqual(standard_limits[("chatbot", "message_count")], ("day", 50))
 
     def test_lifetime_window_has_no_reset_and_week_resets_on_monday(self):
-        lifetime_start, lifetime_reset = _window_for_period("lifetime", _Plan(None, "free", "Free"))
+        granted_at = datetime(2026, 7, 31, 15, 0, tzinfo=timezone.utc)
+        lifetime_start, lifetime_reset = _window_for_period(
+            "lifetime",
+            _Plan(None, "free", "Free", free_usage_started_at=granted_at),
+        )
         week_start, week_reset = _window_for_period("week", _Plan(None, "standard", "Standard"))
 
-        self.assertIsNone(lifetime_start)
+        self.assertEqual(lifetime_start, granted_at)
         self.assertIsNone(lifetime_reset)
         self.assertEqual(week_start.astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).weekday(), 0)
         self.assertEqual((week_reset - week_start).days, 7)

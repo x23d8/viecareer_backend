@@ -30,7 +30,7 @@ async def chat(
     client=Depends(get_openai_client),
 ):
     """Generic helpful assistant."""
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():
         reply = await asyncio.to_thread(
@@ -64,7 +64,7 @@ async def chat_viebot(
         feature_code=FEATURE_CHATBOT,
         metric=METRIC_MESSAGE_COUNT,
     )
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     async with ai_concurrency_limit():
         reply = await asyncio.to_thread(
             run_chat,
@@ -91,7 +91,7 @@ async def chat_interview(
     client=Depends(get_openai_client),
 ):
     """AI Interviewer — technical interview conductor."""
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():
         reply = await asyncio.to_thread(

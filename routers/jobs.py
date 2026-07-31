@@ -243,7 +243,7 @@ async def job_match_analysis(
         job_id=job_id,
         external_auth_id=current_user.user_id,
     )
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     async with ai_concurrency_limit():
         analysis = await asyncio.to_thread(
             analyze_job_match,
@@ -278,7 +278,7 @@ async def job_match_chat(
         job_id=job_id,
         external_auth_id=current_user.user_id,
     )
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     async with ai_concurrency_limit():
         reply = await asyncio.to_thread(
             chat_about_job,

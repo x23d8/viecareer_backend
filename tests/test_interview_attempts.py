@@ -26,6 +26,7 @@ class SequenceCursor:
 class InterviewAttemptTests(unittest.TestCase):
     def test_status_combines_three_initial_and_paid_attempts(self):
         cursor = SequenceCursor([
+            {"is_admin": False},
             None,
             {"purchased": 2, "included_used": 3, "purchased_used": 1},
         ])
@@ -35,12 +36,13 @@ class InterviewAttemptTests(unittest.TestCase):
         self.assertEqual(result.total, 5)
         self.assertEqual(result.remaining, 1)
         self.assertEqual(result.price_vnd, 29_000)
-        self.assertIn("pt.status = 'paid'", cursor.queries[1][0])
-        self.assertIn("s.attempt_consumed = true", cursor.queries[1][0])
-        self.assertIn("s.attempt_plan_code", cursor.queries[1][0])
+        self.assertIn("pt.status = 'paid'", cursor.queries[2][0])
+        self.assertIn("s.attempt_consumed = true", cursor.queries[2][0])
+        self.assertIn("s.attempt_plan_code", cursor.queries[2][0])
 
     def test_free_attempts_are_lifetime_and_never_have_a_reset(self):
         cursor = SequenceCursor([
+            {"is_admin": False},
             None,
             {"purchased": 0, "included_used": 1, "purchased_used": 0},
         ])
@@ -55,6 +57,7 @@ class InterviewAttemptTests(unittest.TestCase):
     def test_existing_free_user_gets_three_attempts_after_one_time_grant(self):
         granted_at = datetime(2026, 7, 31, tzinfo=timezone.utc)
         cursor = SequenceCursor([
+            {"is_admin": False},
             {
                 "code": None,
                 "name": None,
@@ -71,7 +74,20 @@ class InterviewAttemptTests(unittest.TestCase):
         self.assertEqual(result.remaining, 3)
         self.assertEqual(result.period_start, granted_at)
         self.assertIsNone(result.period_end)
-        self.assertEqual(cursor.queries[1][1][4], granted_at)
+        self.assertEqual(cursor.queries[2][1][4], granted_at)
+
+    def test_admin_attempt_status_is_unlimited(self):
+        cursor = SequenceCursor([{"is_admin": True}])
+
+        result = _status_for_user(cursor, "admin-user-id")
+
+        self.assertTrue(result.unlimited)
+        self.assertIsNone(result.remaining)
+        self.assertIsNone(result.plan_max_session_minutes)
+        self.assertEqual(result.quota_payload()["period"], "unlimited")
+        self.assertIsNone(result.quota_payload()["limit"])
+        self.assertEqual(result.payload()["price_vnd"], 0)
+        self.assertFalse(result.payload()["checkout_required"])
 
     def test_attempt_payload_is_non_refundable(self):
         payload = InterviewAttemptStatus(
@@ -89,6 +105,7 @@ class InterviewAttemptTests(unittest.TestCase):
 
     def test_standard_plan_has_distinct_quota_and_session_limit(self):
         cursor = SequenceCursor([
+            {"is_admin": False},
             {
                 "code": "standard",
                 "name": "Standard",
@@ -109,6 +126,7 @@ class InterviewAttemptTests(unittest.TestCase):
     def test_purchased_attempt_is_used_after_plan_quota_and_has_15_minute_limit(self):
         cursor = SequenceCursor([
             {"id": "user-id"},
+            {"is_admin": False},
             {
                 "code": "pro",
                 "name": "Premium",
@@ -123,11 +141,24 @@ class InterviewAttemptTests(unittest.TestCase):
         self.assertEqual(reservation.source, "purchased")
         self.assertEqual(reservation.max_session_minutes, 15)
 
+    def test_admin_can_start_interview_without_consuming_a_wallet_limit(self):
+        cursor = SequenceCursor([
+            {"id": "admin-user-id"},
+            {"is_admin": True},
+        ])
+
+        reservation = consume_interview_attempt(cursor, user_id="admin-user-id")
+
+        self.assertEqual(reservation.plan_code, "admin")
+        self.assertIsNone(reservation.max_session_minutes)
+        self.assertTrue(reservation.status_before.unlimited)
+
     def test_consumption_rejects_when_wallet_is_empty(self):
         # Schema DDL has no fetch, then SELECT ... FOR UPDATE returns the user,
         # and the aggregate query returns an exhausted wallet.
         cursor = SequenceCursor([
             {"id": "user-id"},
+            {"is_admin": False},
             None,
             {"purchased": 0, "included_used": 3, "purchased_used": 0},
         ])

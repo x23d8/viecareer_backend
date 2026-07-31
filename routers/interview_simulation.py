@@ -45,7 +45,7 @@ async def generate_interview_blueprint(
     """Generate structured CV/JD analysis, adaptive question bank, and runtime policy."""
     started_at = time.perf_counter()
     await require_interview_attempt(external_auth_id=current_user.user_id)
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     await check_user_limit_ai(current_user.user_id)
     async with ai_concurrency_limit():
         service = InterviewSimulationService(
@@ -95,7 +95,7 @@ async def generate_coding_plan(
         feature_code=FEATURE_CODING_PLAN,
         metric=METRIC_GENERATION_COUNT,
     )
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     async with ai_concurrency_limit():
         service = InterviewSimulationService(
             client,
@@ -137,7 +137,7 @@ async def select_next_question(
     client=Depends(get_openai_client),
 ):
     """Select the next adaptive question from a generated blueprint and transcript."""
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     async with ai_concurrency_limit():
         service = InterviewSimulationService(
             client,
@@ -170,7 +170,7 @@ async def evaluate_code_interview_route(
         feature_code=FEATURE_AI_CODE_FEEDBACK,
         metric=METRIC_ATTEMPT_COUNT,
     )
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     async with ai_concurrency_limit():
         evaluation = await asyncio.to_thread(
             evaluate_code_interview,

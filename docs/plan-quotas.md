@@ -17,7 +17,7 @@ Chu kỳ ngày và tuần dùng múi giờ `Asia/Ho_Chi_Minh`. Hạn mức ngày
 - Free: ba lượt được tính riêng cho từng tính năng, gắn với tài khoản và không có
   `reset_at`. Đăng xuất, gọi lại API, hết tháng hoặc hết tuần không phục hồi lượt.
 - Tài khoản tồn tại trước ngày áp dụng chính sách được cấp một mốc dùng thử mới
-  đúng một lần, vì vậy mỗi tài khoản cũ nhận lại đủ 3 lượt phỏng vấn. Mốc này
+  đúng một lần, vì vậy mỗi tài khoản cũ nhận lại đủ 3 lượt cho từng tính năng Free. Mốc này
   được lưu ở database và không thay đổi khi deploy lại hoặc gọi API.
 - Phỏng vấn AI: trừ ngay khi backend tạo phiên. Hủy phiên, đóng trình duyệt hoặc
   mất kết nối không hoàn lượt.
@@ -31,3 +31,14 @@ Chu kỳ ngày và tuần dùng múi giờ `Asia/Ho_Chi_Minh`. Hạn mức ngày
 API `GET /api/billing/plans` trả từng mục trong `limits` với `label`,
 `unit_label`, `period_label`, `reset_policy` và `consumption_rule` để giao diện
 pricing/quota không phải tự suy diễn quy tắc.
+
+## Quyền quản trị viên
+
+Tài khoản đang hoạt động có role `admin` trong database được bỏ qua toàn bộ hạn
+mức sản phẩm: phân tích CV/JD, VieBot, tạo đề coding, chấm code, số lượt và thời
+lượng phỏng vấn, cùng giới hạn AI theo ngày. API billing trả
+`unlimited_access: true`, `limit: null`, `remaining: null` và
+`period: "unlimited"` cho các tài khoản này.
+
+Các giới hạn an toàn vận hành như chống spam theo IP/phút và số tác vụ AI chạy
+đồng thời vẫn áp dụng để một tài khoản không thể làm nghẽn dịch vụ.

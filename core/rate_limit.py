@@ -161,12 +161,17 @@ _daily_lock = asyncio.Lock()
 DAILY_AI_QUOTA = int(os.getenv("DAILY_AI_QUOTA", "2000"))  # adjust to your budget
 
 
-async def check_daily_quota() -> None:
+async def check_daily_quota(external_auth_id: str | None = None) -> None:
     """Raise 429 if the backend-wide daily OpenAI call quota is exhausted."""
     from fastapi import HTTPException, status
 
     if APP_ENV in {"development", "dev"}:
         return
+    if external_auth_id:
+        from services.access_control_service import is_active_admin
+
+        if await is_active_admin(external_auth_id=external_auth_id):
+            return
 
     today = time.strftime("%Y-%m-%d", time.gmtime())
     shared_count = await _shared_increment(

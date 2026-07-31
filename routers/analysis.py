@@ -114,7 +114,7 @@ async def extract_cvjd_route(
         )
         return {"reply": cached_reply, "cached": True}
 
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
 
     async with ai_concurrency_limit():
         reply = await asyncio.to_thread(
@@ -198,7 +198,7 @@ async def score_interview_route(
     client=Depends(get_openai_client),
 ):
     """Score interview Q&A pairs across 5 dimensions and return detailed analysis."""
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     await check_user_limit_score(current_user.user_id)
     async with ai_concurrency_limit():
         return {
@@ -284,7 +284,7 @@ async def generate_final_report_route(
     client=Depends(get_openai_client),
 ):
     """Generate a combined final report from live interview and code interview evidence."""
-    await check_daily_quota()
+    await check_daily_quota(current_user.user_id)
     await check_user_limit_score(current_user.user_id)
     async with ai_concurrency_limit():
         return {

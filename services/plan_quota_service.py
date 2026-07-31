@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 
 from config import APP_ENV
 from core.database import get_connection
+from services.access_control_service import is_active_admin_cursor
 
 logger = logging.getLogger("viecareer")
 
@@ -47,6 +48,7 @@ class _Plan:
     subscription_id: int | None = None
     subscription_started_at: datetime | None = None
     subscription_ends_at: datetime | None = None
+    free_usage_started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -269,6 +271,8 @@ def _quota_decision_sync(
     metric: str,
     requested_units: int = 1,
 ) -> QuotaDecision:
+    if is_active_admin_cursor(cur, external_auth_id=external_auth_id):
+        return _unlimited_decision("admin", "Administrator", feature_code, metric)
     plan = _effective_plan(cur, external_auth_id, feature_code)
     limit = _find_limit(cur, plan.code, feature_code, metric)
     if not limit:
@@ -312,7 +316,7 @@ def _free_plan_decision(
     metric: str,
     requested_units: int,
 ) -> QuotaDecision:
-    plan = _free_plan(cur)
+    plan = _free_plan(cur, external_auth_id)
     limit = _find_limit(cur, plan.code, feature_code, metric)
     if not limit or limit.limit_value is None:
         return _unlimited_decision(plan.code, plan.name, feature_code, metric)
@@ -338,6 +342,9 @@ def _get_limit_value_sync(*, external_auth_id: str, feature_code: str, metric: s
     with get_connection() as conn:
         with conn.cursor() as cur:
             _ensure_quota_schema(cur)
+            if is_active_admin_cursor(cur, external_auth_id=external_auth_id):
+                conn.commit()
+                return None
             plan = _effective_plan(cur, external_auth_id, feature_code)
             limit = _find_limit(cur, plan.code, feature_code, metric)
             conn.commit()
@@ -463,7 +470,7 @@ def _seed_limits(cur) -> None:
 def _effective_plan(cur, external_auth_id: str, feature_code: str) -> _Plan:
     active_plans = _active_plans(cur, external_auth_id)
     if not active_plans:
-        return _free_plan(cur)
+        return _free_plan(cur, external_auth_id)
 
     usage_based = next((plan for plan in active_plans if plan.code == PLAN_USAGE_BASED), None)
     recurring_plans = [
@@ -477,7 +484,7 @@ def _effective_plan(cur, external_auth_id: str, feature_code: str) -> _Plan:
         return recurring
     if usage_based and feature_code in _USAGE_BASED_FEATURES:
         return usage_based
-    return recurring or _free_plan(cur)
+    return recurring or _free_plan(cur, external_auth_id)
 
 
 def _active_plans(cur, external_auth_id: str) -> list[_Plan]:
@@ -491,7 +498,8 @@ def _active_plans(cur, external_auth_id: str) -> list[_Plan]:
           coalesce(p.included_members, 1) as included_members,
           s.id as subscription_id,
           s.start_at as subscription_started_at,
-          s.end_at as subscription_ends_at
+          s.end_at as subscription_ends_at,
+          u.free_interview_attempts_granted_at as free_usage_started_at
         from users u
         join user_subscriptions s on s.user_id = u.id
         join plans p on p.id = s.plan_id
@@ -506,19 +514,22 @@ def _active_plans(cur, external_auth_id: str) -> list[_Plan]:
     return [_plan_from_row(row) for row in cur.fetchall()]
 
 
-def _free_plan(cur) -> _Plan:
+def _free_plan(cur, external_auth_id: str | None = None) -> _Plan:
     cur.execute(
         """
         select
-          id,
-          code,
-          name,
-          coalesce(billing_period, 'month') as billing_period,
-          coalesce(included_members, 1) as included_members
-        from plans
-        where code = 'free'
+          p.id,
+          p.code,
+          p.name,
+          coalesce(p.billing_period, 'month') as billing_period,
+          coalesce(p.included_members, 1) as included_members,
+          u.free_interview_attempts_granted_at as free_usage_started_at
+        from plans p
+        left join users u on u.external_auth_id = %s
+        where p.code = 'free'
         limit 1
-        """
+        """,
+        (external_auth_id,),
     )
     row = cur.fetchone()
     if row:
@@ -536,6 +547,7 @@ def _plan_from_row(row: dict[str, Any]) -> _Plan:
         subscription_id=int(row["subscription_id"]) if row.get("subscription_id") is not None else None,
         subscription_started_at=row.get("subscription_started_at"),
         subscription_ends_at=row.get("subscription_ends_at"),
+        free_usage_started_at=_as_aware_datetime(row.get("free_usage_started_at")),
     )
 
 
@@ -623,6 +635,8 @@ def _realtime_session_count(cur, external_auth_id: str, window_start: datetime |
 def _window_for_period(period: str, plan: _Plan) -> tuple[datetime | None, datetime | None]:
     now = datetime.now(QUOTA_TIMEZONE)
     if period == "lifetime":
+        if plan.code == "free":
+            return _as_aware_datetime(plan.free_usage_started_at), None
         return None, None
     if period == "day":
         start = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)

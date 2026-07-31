@@ -67,14 +67,16 @@ def create_live_interview_session(metadata: dict[str, Any]) -> str | None:
         with conn.cursor() as cur:
             _ensure_interview_report_schema(cur)
             reservation = consume_interview_attempt(cur, user_id=user["id"])
-            effective_duration_seconds = min(
-                selected_duration_seconds,
-                reservation.max_session_minutes * 60,
+            max_session_minutes = reservation.max_session_minutes
+            effective_duration_seconds = (
+                selected_duration_seconds
+                if max_session_minutes is None
+                else min(selected_duration_seconds, max_session_minutes * 60)
             )
             context_snapshot["duration_minutes"] = effective_duration_seconds // 60
             context_snapshot["attempt_source"] = reservation.source
             context_snapshot["attempt_plan_code"] = reservation.plan_code
-            context_snapshot["session_max_minutes"] = reservation.max_session_minutes
+            context_snapshot["session_max_minutes"] = max_session_minutes
             cur.execute(
                 """
                 insert into interview_sessions (

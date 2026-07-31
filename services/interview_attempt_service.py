@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException, status
 
 from core.database import get_connection
+from services.access_control_service import is_active_admin_cursor
 
 INTERVIEW_ATTEMPT_PRICE_VND = 29_000
 INTERVIEW_ATTEMPT_PLAN_CODE = "usage_based"
@@ -47,6 +48,7 @@ class _AttemptPlan:
     included: int
     period_start: datetime | None
     period_end: datetime | None
+    unlimited: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,13 +59,16 @@ class InterviewAttemptStatus:
     included_used: int
     purchased: int
     purchased_used: int
-    remaining: int
+    remaining: int | None
     period_start: datetime | None = None
     period_end: datetime | None = None
     price_vnd: int = INTERVIEW_ATTEMPT_PRICE_VND
+    unlimited: bool = False
 
     @property
-    def total(self) -> int:
+    def total(self) -> int | None:
+        if self.unlimited:
+            return None
         return self.included + self.purchased
 
     @property
@@ -71,7 +76,9 @@ class InterviewAttemptStatus:
         return self.included_used + self.purchased_used
 
     @property
-    def included_remaining(self) -> int:
+    def included_remaining(self) -> int | None:
+        if self.unlimited:
+            return None
         return max(0, self.included - self.included_used)
 
     @property
@@ -79,12 +86,16 @@ class InterviewAttemptStatus:
         return max(0, self.purchased - self.purchased_used)
 
     @property
-    def plan_max_session_minutes(self) -> int:
+    def plan_max_session_minutes(self) -> int | None:
+        if self.unlimited:
+            return None
         return PLAN_MAX_SESSION_MINUTES.get(self.plan_code, PLAN_MAX_SESSION_MINUTES["free"])
 
     @property
-    def next_attempt_max_session_minutes(self) -> int:
-        if self.included_remaining > 0:
+    def next_attempt_max_session_minutes(self) -> int | None:
+        if self.unlimited:
+            return None
+        if (self.included_remaining or 0) > 0:
             return self.plan_max_session_minutes
         return PURCHASED_ATTEMPT_MAX_SESSION_MINUTES
 
@@ -109,12 +120,27 @@ class InterviewAttemptStatus:
             "plan_max_session_minutes": self.plan_max_session_minutes,
             "purchased_max_session_minutes": PURCHASED_ATTEMPT_MAX_SESSION_MINUTES,
             "next_attempt_max_session_minutes": self.next_attempt_max_session_minutes,
-            "price_vnd": self.price_vnd,
+            "price_vnd": 0 if self.unlimited else self.price_vnd,
             "currency": "VND",
             "refundable": False,
+            "unlimited": self.unlimited,
+            "checkout_required": not self.unlimited and (self.remaining or 0) <= 0,
         }
 
     def quota_payload(self) -> dict[str, Any]:
+        if self.unlimited:
+            return {
+                "plan_code": "admin",
+                "plan_name": "Administrator",
+                "feature_code": "realtime_interview",
+                "metric": "session_count",
+                "period": "unlimited",
+                "limit": None,
+                "used": self.used,
+                "remaining": None,
+                "reset_at": None,
+                "unlimited": True,
+            }
         period = "lifetime" if self.plan_code == "free" else "week"
         return {
             "plan_code": self.plan_code,
@@ -135,7 +161,7 @@ class InterviewAttemptReservation:
     status_before: InterviewAttemptStatus
 
     @property
-    def max_session_minutes(self) -> int:
+    def max_session_minutes(self) -> int | None:
         if self.source == "purchased":
             return PURCHASED_ATTEMPT_MAX_SESSION_MINUTES
         return self.status_before.plan_max_session_minutes
@@ -171,7 +197,7 @@ def get_interview_attempt_status_sync(*, external_auth_id: str) -> InterviewAtte
 
 async def require_interview_attempt(*, external_auth_id: str) -> InterviewAttemptStatus:
     result = await get_interview_attempt_status(external_auth_id=external_auth_id)
-    if result.remaining <= 0:
+    if not result.unlimited and (result.remaining or 0) <= 0:
         _raise_attempts_exhausted(result)
     return result
 
@@ -188,7 +214,9 @@ def consume_interview_attempt(cur, *, user_id: Any) -> InterviewAttemptReservati
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User profile was not found.")
 
     current = _status_for_user(cur, user_id)
-    if current.included_remaining > 0:
+    if current.unlimited:
+        return InterviewAttemptReservation(source="included", status_before=current)
+    if (current.included_remaining or 0) > 0:
         return InterviewAttemptReservation(source="included", status_before=current)
     if current.purchased_remaining > 0:
         return InterviewAttemptReservation(source="purchased", status_before=current)
@@ -196,6 +224,19 @@ def consume_interview_attempt(cur, *, user_id: Any) -> InterviewAttemptReservati
 
 
 def _status_for_user(cur, user_id: Any) -> InterviewAttemptStatus:
+    if is_active_admin_cursor(cur, user_id=user_id):
+        return InterviewAttemptStatus(
+            plan_code="admin",
+            plan_name="Administrator",
+            included=0,
+            included_used=0,
+            purchased=0,
+            purchased_used=0,
+            remaining=None,
+            period_start=None,
+            period_end=None,
+            unlimited=True,
+        )
     plan = _effective_attempt_plan(cur, user_id)
     cur.execute(
         """
