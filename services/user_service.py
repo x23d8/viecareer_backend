@@ -128,8 +128,10 @@ def upsert_auth_user(
                         )
                         row = cur.fetchone()
 
+                user_payload = _with_database_role(cur, row)
+
             conn.commit()
-            return row
+            return user_payload
     except HTTPException:
         raise
     except Exception as exc:
@@ -326,3 +328,16 @@ def _ensure_user_role(cur) -> int:
         ("user", "User"),
     )
     return cur.fetchone()["id"]
+
+
+def _with_database_role(cur, row: dict[str, Any]) -> dict[str, Any]:
+    """Attach the server-owned role code to an authenticated user payload."""
+    cur.execute(
+        "select lower(code) as role from roles where id = %s limit 1",
+        (row.get("role_id"),),
+    )
+    role_row = cur.fetchone() or {}
+    payload = dict(row)
+    # Unknown/custom roles fail closed to normal-user capabilities on clients.
+    payload["role"] = "admin" if role_row.get("role") == "admin" else "user"
+    return payload

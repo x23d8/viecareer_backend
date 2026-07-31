@@ -281,6 +281,7 @@ class FakeCursor:
             "email": "admin@example.com",
             "full_name": "Admin One",
             "role_id": self.role_id,
+            "role": "admin" if self.role_id == 1 else "user",
         }
 
 

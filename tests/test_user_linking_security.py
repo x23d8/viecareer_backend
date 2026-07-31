@@ -49,6 +49,27 @@ class UserLinkingSecurityTests(unittest.TestCase):
         self.assertEqual(result["email"], "original@example.com")
         self.assertFalse(connection.cursor_instance.email_lookup_attempted)
         self.assertEqual(result["role_id"], 2)
+        self.assertEqual(result["role"], "user")
+
+    def test_existing_admin_role_is_returned_from_database(self):
+        connection = FakeConnection(
+            linked_user={
+                "id": "00000000-0000-0000-0000-000000000005",
+                "email": "admin@example.com",
+                "role_id": 1,
+            },
+            email_owner=None,
+        )
+
+        with patch("services.user_service.get_connection", return_value=connection):
+            result = upsert_auth_user(
+                external_auth_id="user_admin",
+                email="admin@example.com",
+                full_name="Admin User",
+            )
+
+        self.assertEqual(result["role_id"], 1)
+        self.assertEqual(result["role"], "admin")
 
 
     def test_verified_email_relinks_when_previous_clerk_user_is_deleted(self):
@@ -74,6 +95,7 @@ class UserLinkingSecurityTests(unittest.TestCase):
 
         self.assertEqual(result["external_auth_id"], "user_recreated")
         self.assertEqual(result["role_id"], 2)
+        self.assertEqual(result["role"], "user")
         self.assertFalse(connection.cursor_instance.insert_attempted)
 class FakeConnection:
     def __init__(self, *, linked_user, email_owner):
@@ -119,6 +141,9 @@ class FakeCursor:
         if "select id from roles" in normalized:
             self.fetchone_results.append({"id": 2})
             return None
+        if "select lower(code) as role from roles" in normalized:
+            self.fetchone_results.append({"role": "admin" if params[0] == 1 else "user"})
+            return None
         if "from users where external_auth_id" in normalized:
             self.fetchone_results.append(self.linked_user)
             return None
@@ -132,7 +157,7 @@ class FakeCursor:
                     "id": params[-1],
                     "external_auth_id": params[0],
                     "email": (self.linked_user or self.email_owner)["email"],
-                    "role_id": 2,
+                    "role_id": (self.linked_user or self.email_owner).get("role_id", 2),
                 }
             )
             return None

@@ -317,10 +317,11 @@ def require_admin(
     current_user: ClerkUser = Depends(require_auth),
 ) -> AdminUser:
     """
-    FastAPI dependency — require an authenticated user with admin role_id.
+    FastAPI dependency — require an authenticated user with the admin role.
 
     Admin access is decided by the users table, not by Clerk metadata or
-    frontend state. In the current schema role_id=1 is the admin role.
+    frontend state. Authorization follows roles.code instead of assuming a
+    fixed numeric role_id.
     The authenticated Clerk subject must be explicitly linked to the row;
     email fallback is intentionally forbidden.
     """
@@ -329,10 +330,11 @@ def require_admin(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    select id, email, full_name, role_id
-                    from users
-                    where status = 'active'
-                      and external_auth_id = %s
+                    select u.id, u.email, u.full_name, u.role_id, lower(r.code) as role
+                    from users u
+                    join roles r on r.id = u.role_id
+                    where u.status = 'active'
+                      and u.external_auth_id = %s
                     limit 1
                     """,
                     (current_user.user_id,),
@@ -345,7 +347,7 @@ def require_admin(
             detail="Could not verify admin privileges.",
         ) from exc
 
-    if not row or row["role_id"] != 1:
+    if not row or row.get("role") != "admin":
         logger.warning(
             "Admin authorization denied for user=%s role_id=%s jwt_role=%s: %s",
             current_user.user_id,
@@ -361,7 +363,7 @@ def require_admin(
     return AdminUser(
         user_id=current_user.user_id,
         email=row["email"] or current_user.email,
-        role=current_user.role,
+        role=row["role"],
         public_metadata=current_user.public_metadata,
         internal_user_id=str(row["id"]),
         full_name=row["full_name"] or "",
