@@ -32,7 +32,7 @@ OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_ASR_MODEL: str = os.getenv("OPENAI_ASR_MODEL", "gpt-4o-mini-transcribe")
 OPENAI_POLISH_MODEL: str = os.getenv("OPENAI_POLISH_MODEL", "gpt-4o")
-OPENAI_REALTIME_MODEL: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
+OPENAI_REALTIME_MODEL: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime")
 OPENAI_REALTIME_CONNECT_URL: str = os.getenv(
     "OPENAI_REALTIME_CONNECT_URL",
     "https://api.openai.com/v1/realtime/calls",

@@ -355,6 +355,12 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                 continue
             if not state.opening_started:
                 state.opening_started = True
+                await websocket.send_json(
+                    {
+                        "type": "viecareer.mobile.interview.begin.accepted",
+                        "protocol": state.client_protocol,
+                    }
+                )
                 await _send_mobile_opening_response(openai_ws, websocket, state)
             continue
 
@@ -987,19 +993,23 @@ async def _send_mobile_opening_response(openai_ws, websocket: WebSocket, state: 
     state.pending_question_event = None
     await _send_interview_phase(websocket, state.conversation_phase)
     opening = _opening_readiness_prompt(state.metadata)
-    await openai_ws.send(
-        json.dumps(
-            {
-                "type": "response.create",
-                "response": {
-                    "metadata": {"viecareer_phase": "opening_readiness"},
-                    "instructions": (
-                        f"Say exactly this opening and nothing else: {opening} "
-                        "Do not ask a blueprint interview question yet. Wait for the candidate to confirm readiness."
-                    ),
-                },
-            }
-        )
+    response_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {"viecareer_phase": "opening_readiness"},
+            "instructions": (
+                f"Say exactly this opening and nothing else: {opening} "
+                "Do not ask a blueprint interview question yet. Wait for the candidate to confirm readiness."
+            ),
+        },
+    }
+    await openai_ws.send(json.dumps(response_event))
+    await websocket.send_json(
+        {
+            "type": "viecareer.mobile.response.requested",
+            "phase": state.conversation_phase,
+            "response_kind": state.response_kind,
+        }
     )
 
 
