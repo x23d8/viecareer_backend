@@ -52,6 +52,7 @@ _REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secret
 _REALTIME_WEBSOCKET_URL = "wss://api.openai.com/v1/realtime"
 _MAX_WS_MESSAGE_SIZE = 16 * 1024 * 1024
 _MOBILE_REALTIME_PROTOCOL = "viecareer.mobile.realtime.v2"
+_MOBILE_OPENING_RETRY_LIMIT = 3
 _REALTIME_JOB_CONTEXT_CHARS = 6_000
 _REALTIME_CV_CONTEXT_CHARS = 6_000
 _REALTIME_PROFILE_CONTEXT_CHARS = 4_000
@@ -180,6 +181,7 @@ class _RelayState:
     client_protocol: str = "legacy"
     conversation_phase: str = "initializing"
     opening_started: bool = False
+    opening_retry_count: int = 0
     readiness_confirmed: bool = False
 
     def timestamp_sec(self) -> int:
@@ -363,6 +365,24 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                     {
                         "type": "viecareer.mobile.interview.begin.accepted",
                         "protocol": state.client_protocol,
+                    }
+                )
+                await _send_mobile_opening_response(openai_ws, websocket, state)
+            continue
+
+        if event_type == "viecareer.mobile.opening.retry":
+            if (
+                state.initialized
+                and state.opening_started
+                and not state.readiness_confirmed
+                and not state.transcript
+                and state.opening_retry_count < _MOBILE_OPENING_RETRY_LIMIT
+            ):
+                state.opening_retry_count += 1
+                await websocket.send_json(
+                    {
+                        "type": "viecareer.mobile.opening.retry.accepted",
+                        "attempt": state.opening_retry_count,
                     }
                 )
                 await _send_mobile_opening_response(openai_ws, websocket, state)
