@@ -427,6 +427,12 @@ async def _openai_to_client(websocket: WebSocket, openai_ws, state: _RelayState)
         message = raw_message.decode("utf-8") if isinstance(raw_message, bytes) else raw_message
         await websocket.send_text(message)
         await _persist_realtime_event(message, state, openai_ws, websocket)
+    if not state.completed:
+        await _send_client_error(
+            websocket,
+            "OpenAI realtime connection closed before completing a response",
+            code="OPENAI_REALTIME_CLOSED",
+        )
 
 
 async def _interrupt_realtime_playback(openai_ws, websocket: WebSocket) -> None:
@@ -679,6 +685,10 @@ async def _enforce_realtime_time_limit(websocket: WebSocket, openai_ws, state: _
 async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_ws, websocket: WebSocket) -> None:
     event = _json_object(raw_message)
     event_type = event.get("type")
+
+    if event_type == "error":
+        logger.error("OpenAI realtime error event: %s", raw_message)
+        return
 
     if event_type == "response.done":
         has_usage = _event_has_usage(event)
@@ -945,6 +955,7 @@ async def _send_guided_interviewer_response(openai_ws, state: _RelayState) -> No
             {
                 "type": "response.create",
                 "response": {
+                    "output_modalities": ["audio"],
                     "instructions": _response_instructions(state, selected),
                 },
             }
@@ -968,6 +979,7 @@ async def _send_question_clarification_response(
             {
                 "type": "response.create",
                 "response": {
+                    "output_modalities": ["audio"],
                     "instructions": "\n".join(
                         [
                             language_rule,
@@ -996,6 +1008,7 @@ async def _send_mobile_opening_response(openai_ws, websocket: WebSocket, state: 
     response_event = {
         "type": "response.create",
         "response": {
+            "output_modalities": ["audio"],
             "metadata": {"viecareer_phase": "opening_readiness"},
             "instructions": (
                 f"Say exactly this opening and nothing else: {opening} "
@@ -1028,6 +1041,7 @@ async def _send_readiness_followup(openai_ws, websocket: WebSocket, state: _Rela
             {
                 "type": "response.create",
                 "response": {
+                    "output_modalities": ["audio"],
                     "metadata": {"viecareer_phase": "opening_readiness"},
                     "instructions": f"Say exactly this sentence and nothing else: {message}",
                 },
@@ -1061,6 +1075,7 @@ async def _send_interview_closing_response(openai_ws, state: _RelayState) -> Non
             {
                 "type": "response.create",
                 "response": {
+                    "output_modalities": ["audio"],
                     "metadata": {"viecareer_phase": "interview_closing"},
                     "instructions": (
                         f"Say exactly this closing message and nothing else: {closing} "
