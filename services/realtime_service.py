@@ -51,6 +51,7 @@ logger = logging.getLogger("viecareer")
 _REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 _REALTIME_WEBSOCKET_URL = "wss://api.openai.com/v1/realtime"
 _MAX_WS_MESSAGE_SIZE = 16 * 1024 * 1024
+_MOBILE_REALTIME_PROTOCOL = "viecareer.mobile.realtime.v2"
 
 
 def create_realtime_session(
@@ -172,6 +173,10 @@ class _RelayState:
     ptt_language: str = "en"
     ptt_audio_chunks: list[str] = field(default_factory=list)
     ptt_mime_type: str = "audio/pcm;rate=24000"
+    client_protocol: str = "legacy"
+    conversation_phase: str = "initializing"
+    opening_started: bool = False
+    readiness_confirmed: bool = False
 
     def timestamp_sec(self) -> int:
         base = self.session_started_at or self.started_at
@@ -242,6 +247,7 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                 await openai_ws.close()
                 return
 
+            state.client_protocol = str(event.get("protocol") or "legacy").strip()
             metadata = event.get("metadata")
             if not isinstance(metadata, dict) or not metadata:
                 logger.info("Realtime client.start received without metadata; continuing without persistence")
@@ -315,6 +321,7 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                         "max_duration_seconds": state.max_duration_seconds,
                         "max_duration_minutes": _minutes_from_seconds(state.max_duration_seconds),
                     },
+                    "protocol": state.client_protocol,
                 }
             )
             track_user_activity_async(
@@ -329,6 +336,26 @@ async def _client_to_openai(websocket: WebSocket, openai_ws, state: _RelayState)
                     "question_count": len((state.blueprint or {}).get("questions") or []),
                 },
             )
+            continue
+
+        if event_type == "viecareer.mobile.interview.begin":
+            if not state.initialized:
+                await _send_client_error(
+                    websocket,
+                    "Realtime session has not been initialized",
+                    code="SESSION_NOT_READY",
+                )
+                continue
+            if state.client_protocol != _MOBILE_REALTIME_PROTOCOL:
+                await _send_client_error(
+                    websocket,
+                    "Unsupported mobile realtime protocol",
+                    code="UNSUPPORTED_PROTOCOL",
+                )
+                continue
+            if not state.opening_started:
+                state.opening_started = True
+                await _send_mobile_opening_response(openai_ws, websocket, state)
             continue
 
         if event_type == "client.stop":
@@ -512,6 +539,16 @@ async def _process_push_to_talk_turn(
         )
     )
 
+    if state.opening_started and not state.readiness_confirmed and not state.pending_question:
+        if _candidate_is_ready(polished):
+            state.readiness_confirmed = True
+            state.conversation_phase = "transitioning"
+            await _send_interview_phase(websocket, state.conversation_phase)
+            await _send_guided_interviewer_response(openai_ws, state)
+        else:
+            await _send_readiness_followup(openai_ws, websocket, state)
+        return
+
     if state.pending_question and counts_as_answer:
         if state.pending_question_id and state.pending_question_id not in state.answered_question_ids:
             state.answered_question_ids.append(state.pending_question_id)
@@ -658,6 +695,18 @@ async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_w
         )
         if has_usage:
             state.realtime_usage_logged = True
+        if state.response_kind == "readiness":
+            state.conversation_phase = "awaiting_readiness"
+            await _send_interview_phase(websocket, state.conversation_phase)
+        elif state.response_kind == "question" and state.pending_question_id:
+            state.conversation_phase = "awaiting_answer"
+            await _send_interview_phase(
+                websocket,
+                state.conversation_phase,
+                question_id=state.pending_question_id,
+                answered_questions=len(state.answered_question_ids),
+                total_questions=_total_blueprint_questions(state),
+            )
         if state.closing_in_progress and not state.completed:
             await _finalize_question_limited_interview(websocket, openai_ws, state)
         return
@@ -667,13 +716,13 @@ async def _persist_realtime_event(raw_message: str, state: _RelayState, openai_w
         if not text:
             return
 
-        state.active_question_id = _resolve_spoken_question_id(state, text)
-        if state.response_kind != "closing" and state.active_question_id:
+        state.active_question_id = _resolve_spoken_question_id(state, text) if state.response_kind == "question" else None
+        if state.response_kind == "question" and state.active_question_id:
             if state.active_question_id not in state.asked_question_ids:
                 state.asked_question_ids.append(state.active_question_id)
             state.question_order = len(state.asked_question_ids)
         transcript_event = _transcript_event(state, "assistant", text)
-        if state.response_kind != "closing" and state.active_question_id:
+        if state.response_kind == "question" and state.active_question_id:
             state.pending_question = _blueprint_question_text(state, state.active_question_id) or text
             state.pending_question_id = state.active_question_id
             state.pending_question_event = transcript_event
@@ -929,6 +978,58 @@ async def _send_question_clarification_response(
     )
 
 
+async def _send_mobile_opening_response(openai_ws, websocket: WebSocket, state: _RelayState) -> None:
+    state.response_kind = "readiness"
+    state.conversation_phase = "opening"
+    state.active_question_id = None
+    state.pending_question = ""
+    state.pending_question_id = None
+    state.pending_question_event = None
+    await _send_interview_phase(websocket, state.conversation_phase)
+    opening = _opening_readiness_prompt(state.metadata)
+    await openai_ws.send(
+        json.dumps(
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {"viecareer_phase": "opening_readiness"},
+                    "instructions": (
+                        f"Say exactly this opening and nothing else: {opening} "
+                        "Do not ask a blueprint interview question yet. Wait for the candidate to confirm readiness."
+                    ),
+                },
+            }
+        )
+    )
+
+
+async def _send_readiness_followup(openai_ws, websocket: WebSocket, state: _RelayState) -> None:
+    state.response_kind = "readiness"
+    state.conversation_phase = "opening"
+    await _send_interview_phase(websocket, state.conversation_phase)
+    language = str(state.metadata.get("language") or "en").lower()
+    message = (
+        "Không sao. Khi bạn sẵn sàng, hãy nói có hoặc bắt đầu nhé."
+        if language == "vi"
+        else "No problem. When you are ready, say yes or let's begin."
+    )
+    await openai_ws.send(
+        json.dumps(
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {"viecareer_phase": "opening_readiness"},
+                    "instructions": f"Say exactly this sentence and nothing else: {message}",
+                },
+            }
+        )
+    )
+
+
+async def _send_interview_phase(websocket: WebSocket, phase: str, **details: Any) -> None:
+    await websocket.send_json({"type": "viecareer.interview.phase", "phase": phase, **details})
+
+
 async def _send_interview_closing_response(openai_ws, state: _RelayState) -> None:
     if state.closing_in_progress or state.completed:
         return
@@ -1029,6 +1130,24 @@ def _candidate_turn_classification(
     return turn_type, raw_counts if isinstance(raw_counts, bool) else True
 
 
+def _candidate_is_ready(transcript: str) -> bool:
+    normalized = unicodedata.normalize("NFD", str(transcript or "").casefold().replace("đ", "d"))
+    normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+    normalized = re.sub(r"[^a-z0-9']+", " ", normalized).strip()
+    negative_patterns = (
+        r"\b(khong|chua)\b",
+        r"\b(no|not|isn't|am not|not yet)\b",
+        r"\bwait\b|\bdoi (mot chut|ti)\b",
+    )
+    if any(re.search(pattern, normalized) for pattern in negative_patterns):
+        return False
+    affirmative_patterns = (
+        r"\b(co|duoc|ok|okay|oke|san sang|bat dau|tiep tuc)\b",
+        r"\b(yes|yeah|yep|ready|sure|start|begin|go ahead|let's go|lets go)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in affirmative_patterns)
+
+
 def _blueprint_questions(state: _RelayState) -> list[dict[str, Any]]:
     questions = (state.blueprint or {}).get("questions") or []
     return [question for question in questions if isinstance(question, dict) and str(question.get("id") or "").strip()]
@@ -1103,7 +1222,7 @@ def _select_next_question_safe(state: _RelayState) -> dict[str, Any] | None:
     if _interview_questions_complete(state):
         return None
 
-    if not state.answered_question_ids and not any(turn.get("role") == "assistant" for turn in state.transcript):
+    if not state.answered_question_ids and not state.asked_question_ids:
         opening = _opening_question(state)
         if opening:
             return opening
@@ -1134,8 +1253,8 @@ def _select_next_question_safe(state: _RelayState) -> dict[str, Any] | None:
         logger.exception("Could not select adaptive interview question")
         return _first_unanswered_question(state)
 
-    selected = decision.get("selectedQuestion")
-    if not isinstance(selected, dict):
+    selected = _validated_unanswered_question(state, decision.get("selectedQuestion"))
+    if selected is None:
         selected = _first_unanswered_question(state)
 
     decision_meta = decision.get("decision")
@@ -1166,7 +1285,14 @@ def _response_instructions(state: _RelayState, selected: dict[str, Any] | None) 
             f"Intent: {intent}" if intent else "",
             f"Question to ask exactly: {question}",
         ]
-        if first_response:
+        if first_response and state.opening_started:
+            transition = (
+                "Ok, vậy chúng ta đến với câu hỏi đầu tiên."
+                if str(state.metadata.get("language") or "en").lower() == "vi"
+                else "Okay, let's begin with the first question."
+            )
+            opening = f"Begin with exactly this transition sentence: {transition} Then ask the selected question."
+        elif first_response:
             opening = (
                 "This is your first spoken response before the interview starts. "
                 f"Begin with exactly this greeting sentence: {greeting} "
@@ -1223,6 +1349,15 @@ def _opening_greeting(metadata: dict[str, Any] | None) -> str:
     if language == "vi":
         return f"Chào {name}." if name else "Chào bạn."
     return f"Hi {name}." if name else "Hi there."
+
+
+def _opening_readiness_prompt(metadata: dict[str, Any] | None) -> str:
+    language = str((metadata or {}).get("language") or "en").strip().lower()
+    name = _candidate_display_name(metadata) or ("bạn" if language == "vi" else "there")
+    position = _string_value((metadata or {}).get("position")) or ("vị trí này" if language == "vi" else "this role")
+    if language == "vi":
+        return f"Chào {name}, đây là buổi phỏng vấn cho vị trí {position}. Bạn đã sẵn sàng chưa?"
+    return f"Hi {name}, this is your interview for the {position} position. Are you ready?"
 
 
 def _candidate_display_name(metadata: dict[str, Any] | None) -> str:
@@ -1370,14 +1505,27 @@ def _valid_blueprint_questions(blueprint: dict[str, Any] | None) -> list[dict[st
 
 
 def _first_unanswered_question(state: _RelayState) -> dict[str, Any] | None:
-    questions = (state.blueprint or {}).get("questions") or []
-    for question in questions:
-        if not isinstance(question, dict):
-            continue
+    for question in _valid_blueprint_questions(state.blueprint):
         question_id = str(question.get("id") or "")
         if question_id not in state.answered_question_ids:
             return question
     return None
+
+
+def _validated_unanswered_question(state: _RelayState, selected: Any) -> dict[str, Any] | None:
+    if not isinstance(selected, dict):
+        return None
+    selected_id = str(selected.get("id") or "").strip()
+    if not selected_id or selected_id in state.answered_question_ids:
+        return None
+    return next(
+        (
+            question
+            for question in _valid_blueprint_questions(state.blueprint)
+            if str(question.get("id")) == selected_id
+        ),
+        None,
+    )
 
 
 def _opening_question(state: _RelayState) -> dict[str, Any] | None:
