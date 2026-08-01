@@ -52,6 +52,10 @@ _REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secret
 _REALTIME_WEBSOCKET_URL = "wss://api.openai.com/v1/realtime"
 _MAX_WS_MESSAGE_SIZE = 16 * 1024 * 1024
 _MOBILE_REALTIME_PROTOCOL = "viecareer.mobile.realtime.v2"
+_REALTIME_JOB_CONTEXT_CHARS = 6_000
+_REALTIME_CV_CONTEXT_CHARS = 6_000
+_REALTIME_PROFILE_CONTEXT_CHARS = 4_000
+_REALTIME_BLUEPRINT_CONTEXT_CHARS = 4_000
 
 
 def create_realtime_session(
@@ -815,6 +819,7 @@ def _realtime_session_config(
         or (metadata or {}).get("jd_summary")
         or ""
     ).strip()
+    job_description = _truncate_context(job_description, _REALTIME_JOB_CONTEXT_CHARS)
     position = str((metadata or {}).get("position") or "").strip()
     language = str((metadata or {}).get("language") or "en").strip().lower()
     interview_style = str((metadata or {}).get("interview_style") or "mixed").strip()
@@ -1354,6 +1359,8 @@ def _candidate_context(metadata: dict[str, Any] | None) -> str:
     candidate = (metadata or {}).get("candidate")
     profile = candidate.get("profile") if isinstance(candidate, dict) else {}
     cv_text = _string_value(candidate.get("cv_text")) if isinstance(candidate, dict) else ""
+    profile_context = _compact_json(profile, _REALTIME_PROFILE_CONTEXT_CHARS) if profile else ""
+    cv_context = _truncate_context(cv_text, _REALTIME_CV_CONTEXT_CHARS)
 
     return "\n".join(
         part
@@ -1361,8 +1368,8 @@ def _candidate_context(metadata: dict[str, Any] | None) -> str:
             f"Candidate name from extracted CV: {full_name or display_name}" if (full_name or display_name) else "",
             f"Use this spoken candidate name in the opening greeting: {display_name}" if display_name else "",
             "Prefer the CV-extracted candidate name over the account name." if (full_name or display_name) else "",
-            f"Candidate structured profile: {json.dumps(profile, ensure_ascii=False)}" if profile else "",
-            f"Candidate CV context: {cv_text}" if cv_text else "",
+            f"Candidate structured profile: {profile_context}" if profile_context else "",
+            f"Candidate CV context excerpt: {cv_context}" if cv_context else "",
         ]
         if part
     )
@@ -1463,6 +1470,19 @@ def _string_value(value: Any) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _truncate_context(value: str, limit: int) -> str:
+    text = _string_value(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()} ... [truncated for realtime]"
+
+
+def _compact_json(value: Any, limit: int) -> str:
+    if not value:
+        return ""
+    return _truncate_context(json.dumps(value, ensure_ascii=False, separators=(",", ":")), limit)
+
+
 def _ascii_slug(value: str) -> str:
     normalized = unicodedata.normalize("NFD", value.casefold().replace("đ", "d"))
     without_marks = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
@@ -1505,8 +1525,8 @@ def _blueprint_context(blueprint: dict[str, Any] | None, *, direct_conversation:
             "Interview blueprint is available. Use it as the source of truth for interview scope.",
             controller_policy,
             "Do not reveal scoring, blueprint details, ids, topic labels, or selection logic.",
-            f"Blueprint analysis: {json.dumps(analysis, ensure_ascii=False)}",
-            f"Runtime policy: {json.dumps(runtime_policy, ensure_ascii=False)}",
+            f"Blueprint analysis: {_compact_json(analysis, _REALTIME_BLUEPRINT_CONTEXT_CHARS)}",
+            f"Runtime policy: {_compact_json(runtime_policy, _REALTIME_BLUEPRINT_CONTEXT_CHARS)}",
             f"Question bank preview: {json.dumps(compact_questions, ensure_ascii=False)}",
         ]
     )

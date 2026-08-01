@@ -153,6 +153,20 @@ class RealtimeSessionMetadataTests(unittest.TestCase):
         self.assertIn("Python", session["instructions"])
         self.assertIn("entire interview in Vietnamese", session["instructions"])
 
+    def test_session_instructions_truncate_large_cv_and_jd_context(self):
+        payload = valid_metadata()
+        payload["job_description"] = "J" * 50_000
+        payload["candidate"]["cv_text"] = "C" * 50_000
+        payload["candidate"]["profile"] = {"summary": "P" * 20_000}
+        metadata = RealtimeSessionMetadata.model_validate(payload).model_dump(mode="json")
+        event = _session_update_event(metadata, metadata["blueprint"])
+        instructions = event["session"]["instructions"]
+
+        self.assertIn("[truncated for realtime]", instructions)
+        self.assertLess(len(instructions), 25_000)
+        self.assertNotIn("J" * 10_000, instructions)
+        self.assertNotIn("C" * 10_000, instructions)
+
     def test_direct_realtime_session_uses_validated_question_progress_tool(self):
         metadata = RealtimeSessionMetadata.model_validate(valid_metadata()).model_dump(mode="json")
         config = _realtime_session_config(metadata, metadata["blueprint"], create_response=True)
