@@ -1,5 +1,7 @@
+import asyncio
 import csv
 import io
+import inspect
 import logging
 import uuid
 
@@ -25,7 +27,9 @@ from core.rate_limit import limiter
 from schemas.admin import AdminReportExportRequest, AdminUserStatusRequest
 from schemas.events import LandingMetricGroupBy, LandingSource
 from services.admin_report_export_service import build_admin_report_workbook
+from services.admin_job_crawler_service import get_crawler_sources
 from services.billing_service import reconcile_pending_payos_payments
+from services.feedback_service import list_admin_feedback
 from services.feature_tracking_service import FeatureGroupBy, get_feature_metrics as get_feature_metrics_service
 from services.landing_event_service import ensure_landing_events_schema, get_landing_metrics
 
@@ -183,6 +187,172 @@ def _ensure_activity_logs_schema() -> None:
 @router.get("/me")
 def get_current_admin(current_admin: AdminUser = Depends(require_admin)):
     return {"data": _admin_payload(current_admin)}
+
+
+def _admin_endpoint_data(loader, /, **kwargs) -> Any:
+    """Call an admin route implementation without re-running its HTTP decorators."""
+    payload = inspect.unwrap(loader)(**kwargs)
+    if not isinstance(payload, dict) or "data" not in payload:
+        raise RuntimeError("Admin bootstrap loader returned an invalid payload.")
+    return payload["data"]
+
+
+@router.get("/bootstrap")
+@limiter.limit("10/minute")
+async def get_admin_bootstrap(
+    request: Request,
+    response: Response,
+    date_to: date | None = Query(default=None),
+    current_admin: AdminUser = Depends(require_admin),
+):
+    """Load every admin section's initial dataset in one authenticated request."""
+    end_date = date_to or datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=29)
+    payment_start_date = end_date - timedelta(days=89)
+
+    try:
+        (
+            overview,
+            customers,
+            sessions,
+            payments,
+            activity_logs,
+            ai_cost_summary,
+            ai_cost_events,
+            feedback,
+            crawler_sources,
+        ) = await asyncio.gather(
+            asyncio.to_thread(
+                _admin_endpoint_data,
+                get_admin_overview,
+                date_from=start_date,
+                date_to=end_date,
+                group_by="day",
+                current_admin=current_admin,
+            ),
+            asyncio.to_thread(
+                _admin_endpoint_data,
+                list_admin_users,
+                limit=100,
+                offset=0,
+                search=None,
+                status_filter=None,
+                plan=None,
+                current_admin=current_admin,
+            ),
+            asyncio.to_thread(
+                _admin_endpoint_data,
+                list_admin_sessions,
+                limit=8,
+                offset=0,
+                search=None,
+                status_filter=None,
+                session_type=None,
+                current_admin=current_admin,
+            ),
+            asyncio.to_thread(
+                _admin_endpoint_data,
+                list_admin_payments,
+                limit=20,
+                offset=0,
+                search=None,
+                date_from=payment_start_date,
+                date_to=end_date,
+                status_filter=None,
+                plan=None,
+                group_by="day",
+                current_admin=current_admin,
+            ),
+            asyncio.to_thread(
+                _admin_endpoint_data,
+                get_admin_activity_logs,
+                request=request,
+                date_from=start_date,
+                date_to=end_date,
+                type_filter=None,
+                search=None,
+                limit=10,
+                offset=0,
+                current_admin=current_admin,
+            ),
+            asyncio.to_thread(
+                _admin_endpoint_data,
+                get_admin_ai_cost_summary,
+                request=request,
+                date_from=start_date,
+                date_to=end_date,
+                feature=None,
+                model=None,
+                status_filter=None,
+                current_admin=current_admin,
+            ),
+            asyncio.to_thread(
+                _admin_endpoint_data,
+                get_admin_ai_cost_events,
+                request=request,
+                date_from=start_date,
+                date_to=end_date,
+                feature=None,
+                model=None,
+                status_filter=None,
+                search=None,
+                limit=20,
+                offset=0,
+                current_admin=current_admin,
+            ),
+            asyncio.to_thread(
+                list_admin_feedback,
+                limit=12,
+                offset=0,
+                search=None,
+                negative_only=False,
+                source=None,
+                emotion=None,
+                rating_max=None,
+                tag=None,
+            ),
+            asyncio.to_thread(get_crawler_sources),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not load the admin bootstrap dataset")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not load the admin workspace.",
+        ) from exc
+
+    users = {
+        **customers,
+        "items": customers.get("items", [])[:10],
+        "pagination": {
+            **customers.get("pagination", {}),
+            "limit": 10,
+            "offset": 0,
+        },
+    }
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "data": {
+            "loaded_at": datetime.now(timezone.utc),
+            "defaults": {
+                "date_from": start_date,
+                "date_to": end_date,
+                "payment_date_from": payment_start_date,
+                "group_by": "day",
+            },
+            "overview": overview,
+            "customers": customers,
+            "users": users,
+            "sessions": sessions,
+            "payments": payments,
+            "activity_logs": activity_logs,
+            "feedback": feedback,
+            "ai_cost_summary": ai_cost_summary,
+            "ai_cost_events": ai_cost_events,
+            "crawler_sources": crawler_sources,
+        }
+    }
 
 
 @router.get("/overview")
