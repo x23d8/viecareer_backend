@@ -19,6 +19,12 @@ RUN pip install --no-cache-dir --upgrade pip \
 # ── Runtime stage ───────────────────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
 
+# Keep all process-level date handling deterministic. JWT verification itself
+# uses UTC epoch claims and is therefore independent of this setting.
+ENV TZ=UTC \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 # Runtime-only system lib required by sounddevice.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 \

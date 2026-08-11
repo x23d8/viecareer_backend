@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
-from core.clerk_auth import ClerkUser, require_admin, verified_request_email
+from core.clerk_auth import CLERK_ISSUER, ClerkUser, _verify_token, require_admin, verified_request_email
 from core.middleware import PayloadSizeLimitMiddleware
 from main import app
 from routers import database
@@ -42,6 +42,31 @@ class BackendHardeningTests(unittest.TestCase):
         response = self.client.get("/api/auth/legal-status")
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.headers.get("www-authenticate"), "Bearer")
+
+    def test_clerk_token_verification_is_strict_and_timezone_independent(self):
+        jwks_client = unittest.mock.Mock()
+        jwks_client.get_signing_key_from_jwt.return_value.key = "public-key"
+        payload = {
+            "sub": "user_123",
+            "iss": "https://example.com",
+            "exp": 2_000_000_000,
+            "nbf": 1_000_000_000,
+        }
+
+        with (
+            patch("core.clerk_auth._get_jwks_client", return_value=jwks_client),
+            patch("core.clerk_auth.jwt.decode", return_value=payload) as decode,
+        ):
+            user = _verify_token("signed-token")
+
+        self.assertEqual(user.user_id, "user_123")
+        kwargs = decode.call_args.kwargs
+        self.assertEqual(kwargs["leeway"], 0)
+        self.assertEqual(kwargs["issuer"], CLERK_ISSUER)
+        self.assertEqual(kwargs["options"]["require"], ["exp", "nbf", "iss", "sub"])
+        self.assertTrue(kwargs["options"]["verify_exp"])
+        self.assertTrue(kwargs["options"]["verify_nbf"])
+        self.assertTrue(kwargs["options"]["verify_iss"])
 
     def test_verified_email_claim_rejects_body_mismatch(self):
         with self.assertRaises(HTTPException) as raised:

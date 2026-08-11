@@ -137,23 +137,22 @@ def _verify_token(token: str) -> ClerkUser:
             detail="Invalid authentication token.",
         )
 
+    # JWT NumericDate claims are UTC epoch seconds, so verification is independent
+    # of the host/container timezone. Do not add a client-clock grace period here:
+    # callers must refresh an expired token and retry with a newly minted one.
     decode_options: dict = {
         "verify_exp": True,
         "verify_nbf": True,
+        "verify_iss": True,
+        "verify_aud": False,
+        "require": ["exp", "nbf", "iss", "sub"],
     }
     decode_kwargs: dict = {
         "algorithms": ["RS256"],
         "options": decode_options,
-        "leeway": 10,  # 10 s clock skew tolerance
+        "issuer": CLERK_ISSUER,
+        "leeway": 0,
     }
-    # Only verify issuer when CLERK_ISSUER is explicitly configured
-    if CLERK_ISSUER:
-        decode_kwargs["issuer"] = CLERK_ISSUER
-    else:
-        decode_kwargs["options"]["verify_iss"] = False
-
-    # Clerk JWTs do not use a standard "aud" claim — skip audience verification
-    decode_kwargs["options"]["verify_aud"] = False
 
     try:
         payload = jwt.decode(token, signing_key.key, **decode_kwargs)
